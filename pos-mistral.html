@@ -1436,8 +1436,13 @@
           derivedTotals.subtotal = roundToCents(derivedTotals.subtotal);
           derivedTotals.tax = roundToCents(derivedTotals.tax);
           derivedTotals.total = roundToCents(derivedTotals.total);
-          const rawGross = current.items.reduce((s, i) => s + i.price * i.qty, 0);
-          const discountAmt = current.thomasDiscount ? roundToCents(rawGross - derivedTotals.total) : 0;
+          const rawGross = current.items.reduce(
+            (s, i) => s + i.price * i.qty,
+            0,
+          );
+          const discountAmt = current.thomasDiscount
+            ? roundToCents(rawGross - derivedTotals.total)
+            : 0;
           const ticket = {
             business: {
               name: settings.businessName,
@@ -1488,8 +1493,13 @@
           derivedTotals.subtotal = roundToCents(derivedTotals.subtotal);
           derivedTotals.tax = roundToCents(derivedTotals.tax);
           derivedTotals.total = roundToCents(derivedTotals.total);
-          const rawGross = current.items.reduce((s, i) => s + i.price * i.qty, 0);
-          const discountAmt = current.thomasDiscount ? roundToCents(rawGross - derivedTotals.total) : 0;
+          const rawGross = current.items.reduce(
+            (s, i) => s + i.price * i.qty,
+            0,
+          );
+          const discountAmt = current.thomasDiscount
+            ? roundToCents(rawGross - derivedTotals.total)
+            : 0;
           const ticket = {
             business: {
               name: settings.businessName,
@@ -1554,7 +1564,9 @@
           derivedTotals.tax = roundToCents(derivedTotals.tax);
           derivedTotals.total = roundToCents(derivedTotals.total);
           const rawGross = order.items.reduce((s, i) => s + i.price * i.qty, 0);
-          const discountAmt = order.thomasDiscount ? roundToCents(rawGross - derivedTotals.total) : 0;
+          const discountAmt = order.thomasDiscount
+            ? roundToCents(rawGross - derivedTotals.total)
+            : 0;
           return {
             business: {
               name: settings.businessName,
@@ -1621,7 +1633,9 @@
           derivedTotals.tax = roundToCents(derivedTotals.tax);
           derivedTotals.total = roundToCents(derivedTotals.total);
           const rawGross = order.items.reduce((s, i) => s + i.price * i.qty, 0);
-          const discountAmt = order.thomasDiscount ? roundToCents(rawGross - derivedTotals.total) : 0;
+          const discountAmt = order.thomasDiscount
+            ? roundToCents(rawGross - derivedTotals.total)
+            : 0;
           const ticket = {
             business: {
               name: settings.businessName,
@@ -2288,7 +2302,9 @@
                       if (!itemStats[key])
                         itemStats[key] = { name: key, qty: 0, revenue: 0 };
                       itemStats[key].qty += item.qty;
-                      itemStats[key].revenue += roundToCents(item.price * item.qty * df);
+                      itemStats[key].revenue += roundToCents(
+                        item.price * item.qty * df,
+                      );
                     });
                   });
                   const byQty = Object.values(itemStats).sort(
@@ -2305,7 +2321,9 @@
                       (a, item) => a + item.price * item.qty,
                       0,
                     );
-                    return s + roundToCents(t.thomasDiscount ? gross * 0.9 : gross);
+                    return (
+                      s + roundToCents(t.thomasDiscount ? gross * 0.9 : gross)
+                    );
                   }, 0);
                   const closedRevenue = overview.reduce(
                     (s, o) => s + (o?.totals?.total || 0),
@@ -2340,7 +2358,9 @@
                         0,
                       );
                       return {
-                        total: roundToCents(t.thomasDiscount ? gross * 0.9 : gross),
+                        total: roundToCents(
+                          t.thomasDiscount ? gross * 0.9 : gross,
+                        ),
                         cashPaid: t.cashPaid,
                       };
                     }),
@@ -2364,9 +2384,9 @@
                       (a, item) => a + item.price * item.qty,
                       0,
                     );
-                    tableStats[tableNum].revenue += roundToCents(t.thomasDiscount
-                      ? gross * 0.9
-                      : gross);
+                    tableStats[tableNum].revenue += roundToCents(
+                      t.thomasDiscount ? gross * 0.9 : gross,
+                    );
                   });
                   const tableRanking = Object.entries(tableStats)
                     .map(([t, s]) => ({ table: t, ...s }))
