@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>POS App: Mistral (VAT PDF Tickets)</title>
+    <title>Mistral POS</title>
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
@@ -502,6 +502,7 @@
         nextReceiptNumber: 1,
         footerNote: "Thank you for your visit!",
         payconiqLink: "",
+        pdfMode: "share",
       };
 
       function formatReceiptNo(prefix, n) {
@@ -591,6 +592,17 @@
                     placeholder="https://payconiq.com/t/1/..."
                   />
                 </label>
+                <label className="block text-sm">
+                  PDF VAT Ticket mode
+                  <select
+                    className="w-full border dark:border-neutral-600 rounded px-2 py-1 dark:bg-neutral-700 mt-1"
+                    value={form.pdfMode || "share"}
+                    onChange={(e) => update("pdfMode", e.target.value)}
+                  >
+                    <option value="share">Share (Mail, AirDrop, etc.)</option>
+                    <option value="download">Download</option>
+                  </select>
+                </label>
               </div>
               <div className="mt-3 pt-3 border-t border-neutral-200 dark:border-neutral-700">
                 <div className="text-sm font-medium mb-1">Backup / Restore</div>
@@ -602,6 +614,7 @@
                         alert("No auto-backup found.");
                         return;
                       }
+                      if (!confirm("Restore auto-backup? This will replace all current data.")) return;
                       onRestore(JSON.parse(backup));
                     }}
                     className="px-3 py-1 border rounded hover:bg-neutral-100 dark:hover:bg-neutral-700 dark:border-neutral-600"
@@ -620,6 +633,7 @@
                         const reader = new FileReader();
                         reader.onload = (evt) => {
                           try {
+                            if (!confirm("Restore from file? This will replace all current data.")) return;
                             onRestore(JSON.parse(evt.target.result));
                           } catch (err) {
                             alert("Failed to restore: " + err.message);
@@ -700,7 +714,7 @@
       }
 
       // --- VAT breakdown helper ---
-      function computeVatBreakdown(items) {
+      function computeVatBreakdown(items, discountFactor = 1) {
         const summary = {};
         const lines = items.map((item) => {
           const gross = item.price * item.qty;
@@ -708,9 +722,9 @@
           const vatAmt = gross - net;
           const rate = item.vat;
           if (!summary[rate]) summary[rate] = { net: 0, vat: 0, gross: 0 };
-          summary[rate].net += net;
-          summary[rate].vat += vatAmt;
-          summary[rate].gross += gross;
+          summary[rate].net += net * discountFactor;
+          summary[rate].vat += vatAmt * discountFactor;
+          summary[rate].gross += gross * discountFactor;
           return {
             name: item.name,
             qty: item.qty,
@@ -731,196 +745,85 @@
 
       // --- PDF generator ---
       function downloadVatTicketPDF(ticket, opts = { format: "receipt" }) {
-        const jsPDFCtor = getJsPDFCtor();
-        if (!jsPDFCtor) {
-          alert(
-            "PDF engine (jsPDF) failed to load. Please check your internet connection or allow CDN scripts.",
-          );
-          return;
-        }
-        const fmt = (n) =>
-          new Intl.NumberFormat(undefined, {
-            style: "currency",
-            currency: "EUR",
-          }).format(roundToCents(n));
-        const doc = new jsPDFCtor({
-          unit: "mm",
-          format: opts.format === "a4" ? "a4" : [80, 200],
-        });
-        if (typeof doc.autoTable !== "function") {
-          alert(
-            "jsPDF AutoTable plugin not loaded. PDF will not include tables. Please ensure CDN access.",
-          );
-        }
-        const pageWidth = doc.internal.pageSize.getWidth();
-        const marginX = 5;
-        let y = 8;
-
-        // Header
-        doc.setFontSize(13);
-        doc.text(ticket.business.name || "Business", marginX, y);
-        y += 5;
-        doc.setFontSize(9);
-        if (ticket.business.address) {
-          doc.text(ticket.business.address, marginX, y);
-          y += 4;
-        }
-        if (ticket.business.vatNumber) {
-          doc.text(`VAT: ${ticket.business.vatNumber}`, marginX, y);
-          y += 5;
-        }
-        doc.setDrawColor(150);
-        doc.line(marginX, y, pageWidth - marginX, y);
-        y += 3;
-
-        // Meta
-        doc.setFontSize(9);
-        if (ticket.receiptNo) {
-          doc.text(`Receipt: ${ticket.receiptNo}`, marginX, y);
-          y += 4;
-        }
-        doc.text(
-          `Date: ${new Date(ticket.timestamp).toLocaleString()}`,
-          marginX,
-          y,
-        );
-        y += 4;
-        doc.text(`Table: ${ticket.table}`, marginX, y);
-        y += 2;
-
-        // Items
-        const itemsBody = ticket.lines.map((line) => [
-          `${line.qty} × ${line.name}`,
-          fmt(line.unitGross),
-          `${(line.vatRate * 100).toFixed(0)}%`,
-          fmt(line.lineGross),
-        ]);
-        if (typeof doc.autoTable === "function") {
-          doc.autoTable({
-            startY: y,
-            head: [["Item", "Unit (incl.)", "VAT", "Total"]],
-            body: itemsBody,
-            theme: "plain",
-            styles: { fontSize: 8, cellPadding: 1 },
-            headStyles: { fillColor: [245, 245, 245] },
-            columnStyles: {
-              1: { halign: "right" },
-              2: { halign: "right" },
-              3: { halign: "right" },
-            },
-          });
-          y = doc.lastAutoTable.finalY + 2;
-          doc.line(marginX, y, pageWidth - marginX, y);
-          y += 2;
-        } else {
-          doc.text("Items:", marginX, y);
-          y += 4;
-          itemsBody.forEach((row) => {
-            doc.text(`${row[0]}  ${row[1]}  ${row[2]}  ${row[3]}`, marginX, y);
-            y += 4;
-          });
-          y += 2;
-        }
-
-        // Totals
-        if (typeof doc.autoTable === "function") {
-          doc.autoTable({
-            startY: y,
-            theme: "plain",
-            styles: { fontSize: 9, cellPadding: { top: 0.5, bottom: 0.5 } },
-            body: [
-              ["Subtotal (excl. VAT)", fmt(ticket.totals.subtotal)],
-              ["VAT total", fmt(ticket.totals.tax)],
-              [
-                { content: "Total (incl. VAT)", styles: { fontStyle: "bold" } },
-                {
-                  content: fmt(ticket.totals.total),
-                  styles: { fontStyle: "bold", halign: "right" },
-                },
-              ],
-            ],
-            columnStyles: {
-              0: { cellWidth: pageWidth - marginX * 2 - 34 },
-              1: { halign: "right", cellWidth: 34 },
-            },
-          });
-          y = doc.lastAutoTable.finalY + 3;
-        } else {
-          doc.text(
-            `Subtotal (excl. VAT): ${fmt(ticket.totals.subtotal)}`,
-            marginX,
-            y,
-          );
-          y += 4;
-          doc.text(`VAT total: ${fmt(ticket.totals.tax)}`, marginX, y);
-          y += 4;
-          doc.text(
-            `Total (incl. VAT): ${fmt(ticket.totals.total)}`,
-            marginX,
-            y,
-          );
-          y += 6;
-        }
-
-        // VAT breakdown
-        const vatRows = Object.keys(ticket.vatSummary)
-          .sort()
-          .map((rate) => {
-            const entry = ticket.vatSummary[rate];
-            return [
-              `${(parseFloat(rate) * 100).toFixed(0)}%`,
-              fmt(entry.net),
-              fmt(entry.vat),
-              fmt(entry.gross),
-            ];
-          });
-        if (typeof doc.autoTable === "function") {
-          doc.setFontSize(9);
-          doc.text("VAT breakdown", marginX, y);
-          y += 1;
-          doc.autoTable({
-            startY: y,
-            head: [["Rate", "Net", "VAT", "Gross"]],
-            body: vatRows,
-            theme: "plain",
-            styles: { fontSize: 8, cellPadding: 1 },
-            headStyles: { fillColor: [245, 245, 245] },
-            columnStyles: {
-              1: { halign: "right" },
-              2: { halign: "right" },
-              3: { halign: "right" },
-            },
-          });
-          y = doc.lastAutoTable.finalY + 3;
-        }
-
-        // Payment + comment + footer
-        doc.setFontSize(9);
-        doc.text(`Payment: ${ticket.paymentMethod}`, marginX, y);
-        y += 4;
-        if (ticket.comment) {
-          doc.setTextColor(90);
-          doc.text(`Comment: ${ticket.comment}`, marginX, y);
-          doc.setTextColor(0);
-          y += 4;
-        }
-        if (ticket.footerNote) {
-          doc.setTextColor(90);
-          doc.text(ticket.footerNote, marginX, y);
-          doc.setTextColor(0);
-        }
-
-        const fileName = (
-          ticket.receiptNo
-            ? `${ticket.receiptNo}.pdf`
-            : `Receipt_${new Date(ticket.timestamp).toISOString()}.pdf`
-        ).replace(/[:]/g, "-");
+        const result = buildVatTicketDoc(ticket, opts);
+        if (!result) { alert("PDF engine (jsPDF) failed to load."); return; }
         try {
-          doc.save(fileName);
+          result.doc.save(result.fileName);
         } catch (e) {
-          alert(
-            "Unable to download PDF. If you are in an in-app browser, try opening in Chrome/Edge/Safari.",
-          );
+          alert("Unable to download PDF. If you are in an in-app browser, try opening in Chrome/Edge/Safari.");
+        }
+      }
+
+      function buildVatTicketDoc(ticket, opts = { format: "receipt" }) {
+        const jsPDFCtor = getJsPDFCtor();
+        if (!jsPDFCtor) return null;
+        const fmt = (n) => {
+          const v = roundToCents(n).toFixed(2);
+          const [int, dec] = v.split(".");
+          const intFmt = int.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+          return intFmt + "." + dec;
+        };
+        const isReceipt = opts.format !== "a4";
+        // Estimate receipt height: header(30) + meta(12) + items(6 per line + 8 header) + totals(15) + vat(20) + footer(15) + margin(10)
+        const itemCount = ticket.lines ? ticket.lines.length : 0;
+        const vatRateCount = ticket.vatSummary ? Object.keys(ticket.vatSummary).length : 1;
+        const estimatedHeight = isReceipt ? Math.max(120, 75 + itemCount * 6 + vatRateCount * 6 + 30) : undefined;
+        const doc = new jsPDFCtor({ unit: "mm", format: isReceipt ? [80, estimatedHeight] : "a4" });
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const marginX = 4;
+        let y = 8;
+        doc.setFontSize(13);
+        doc.text(ticket.business.name || "Business", marginX, y); y += 5;
+        doc.setFontSize(9);
+        if (ticket.business.address) { doc.text(ticket.business.address, marginX, y); y += 4; }
+        if (ticket.business.vatNumber) { doc.text(`VAT: ${ticket.business.vatNumber}`, marginX, y); y += 5; }
+        doc.setDrawColor(150); doc.line(marginX, y, pageWidth - marginX, y); y += 3;
+        doc.setFontSize(9);
+        if (ticket.receiptNo) { doc.text(`Receipt: ${ticket.receiptNo}`, marginX, y); y += 4; }
+        doc.text(`Date: ${new Date(ticket.timestamp).toLocaleString()}`, marginX, y); y += 4;
+        doc.text(`Table: ${ticket.table}`, marginX, y); y += 2;
+        const itemsBody = ticket.lines.map((line) => [`${line.qty} × ${line.name}`, fmt(line.unitGross), `${(line.vatRate * 100).toFixed(0)}%`, fmt(line.lineGross)]);
+        if (typeof doc.autoTable === "function") {
+          doc.autoTable({ startY: y, margin: { left: marginX, right: marginX }, tableWidth: pageWidth - marginX * 2, head: [["Item", "Unit € (incl.)", "VAT", "Total €"]], body: itemsBody, theme: "plain", styles: { fontSize: 8, cellPadding: 1, overflow: "linebreak" }, headStyles: { fillColor: [245, 245, 245] }, columnStyles: { 0: { cellWidth: "auto" }, 1: { halign: "right", cellWidth: 16 }, 2: { halign: "right", cellWidth: 10 }, 3: { halign: "right", cellWidth: 16 } } });
+          y = doc.lastAutoTable.finalY + 2; doc.line(marginX, y, pageWidth - marginX, y); y += 2;
+        }
+        if (typeof doc.autoTable === "function") {
+          const totalsBody = [];
+          if (ticket.discount) {
+            const undiscounted = ticket.totals.total / (1 - ticket.discount / 100);
+            totalsBody.push([`Discount (${ticket.discount}%)`, `-${fmt(undiscounted * ticket.discount / 100)} €`]);
+          }
+          totalsBody.push(["Subtotal (excl. VAT)", fmt(ticket.totals.subtotal) + " €"]);
+          totalsBody.push(["VAT total", fmt(ticket.totals.tax) + " €"]);
+          totalsBody.push([{ content: "Total (incl. VAT)", styles: { fontStyle: "bold" } }, { content: fmt(ticket.totals.total) + " €", styles: { fontStyle: "bold", halign: "right" } }]);
+          doc.autoTable({ startY: y, theme: "plain", margin: { left: marginX, right: marginX }, tableWidth: pageWidth - marginX * 2, styles: { fontSize: 9, cellPadding: { top: 0.5, bottom: 0.5, left: 1, right: 1 }, overflow: "linebreak" }, body: totalsBody, columnStyles: { 0: { cellWidth: "auto" }, 1: { halign: "right", cellWidth: 20 } } });
+          y = doc.lastAutoTable.finalY + 3;
+        }
+        const vatRows = Object.keys(ticket.vatSummary).sort().map((rate) => { const entry = ticket.vatSummary[rate]; return [`${(parseFloat(rate) * 100).toFixed(0)}%`, fmt(entry.net), fmt(entry.vat), fmt(entry.gross)]; });
+        if (typeof doc.autoTable === "function") {
+          doc.setFontSize(9); doc.text("VAT breakdown", marginX, y); y += 1;
+          doc.autoTable({ startY: y, margin: { left: marginX, right: marginX }, tableWidth: pageWidth - marginX * 2, head: [["Rate", "Net €", "VAT €", "Gross €"]], body: vatRows, theme: "plain", styles: { fontSize: 8, cellPadding: 1, overflow: "linebreak" }, headStyles: { fillColor: [245, 245, 245] }, columnStyles: { 0: { cellWidth: "auto" }, 1: { halign: "right", cellWidth: 18 }, 2: { halign: "right", cellWidth: 16 }, 3: { halign: "right", cellWidth: 18 } } });
+          y = doc.lastAutoTable.finalY + 3;
+        }
+        doc.setFontSize(9);
+        doc.text(`Payment: ${ticket.paymentMethod}`, marginX, y); y += 4;
+        if (ticket.comment) { doc.setTextColor(90); doc.text(`Comment: ${ticket.comment}`, marginX, y); doc.setTextColor(0); y += 4; }
+        if (ticket.footerNote) { doc.setTextColor(90); doc.text(ticket.footerNote, marginX, y); doc.setTextColor(0); }
+        const dateLabel = new Date(ticket.timestamp).toLocaleDateString();
+        const shareTitle = `${ticket.business.name || "Mistral"} - VAT Ticket - ${dateLabel}`;
+        const fileName = shareTitle.replace(/[^a-zA-Z0-9 \-]/g, "").replace(/\s+/g, "_") + ".pdf";
+        return { doc, fileName, shareTitle };
+      }
+
+      function shareVatTicketPDF(ticket, opts = { format: "receipt" }) {
+        const result = buildVatTicketDoc(ticket, opts);
+        if (!result) { alert("PDF engine (jsPDF) failed to load."); return; }
+        const blob = result.doc.output("blob");
+        const file = new File([blob], result.fileName, { type: "application/pdf" });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          navigator.share({ files: [file], title: result.shareTitle }).catch(() => {});
+        } else {
+          result.doc.save(result.fileName);
         }
       }
 
@@ -1120,14 +1023,15 @@
         function closeOrder() {
           const tableOrder = orders[selectedTable] || emptyTable;
           if (!tableOrder.items.length) return;
+          const discountFactor = tableOrder.thomasDiscount ? 0.9 : 1;
           const gross = tableOrder.items.reduce(
             (sum, item) => sum + item.price * item.qty,
             0,
-          );
+          ) * discountFactor;
           const net = tableOrder.items.reduce(
             (sum, item) => sum + (item.price * item.qty) / (1 + item.vat),
             0,
-          );
+          ) * discountFactor;
           const totalsSnapshot = {
             subtotal: net,
             tax: gross - net,
@@ -1165,6 +1069,8 @@
             Table: order.table,
             Timestamp: order.timestamp,
             CashPaid: order.cashPaid,
+            Discount: order.thomasDiscount || false,
+            Tip_EUR: roundToCents(order.tip || 0),
             Comment: order.comment || "",
             ReceiptNo: order.receiptNo || "",
             SubtotalNet_EUR: roundToCents(order.totals.subtotal),
@@ -1220,6 +1126,10 @@
         function reopenOrder(index) {
           const order = overview[index];
           if (!order) return;
+          const existing = orders[order.table];
+          if (existing && existing.items && existing.items.length > 0) {
+            if (!confirm(`Table ${order.table} already has ${existing.items.length} items. Replace current order?`)) return;
+          }
           setOrders((prev) => ({
             ...prev,
             [order.table]: {
@@ -1236,9 +1146,21 @@
         }
 
         const grandTotal = overview.reduce((sum, order) => {
-          const total = order?.totals?.total || 0;
-          return sum + (order.thomasDiscount ? total * 0.9 : total);
+          return sum + (order?.totals?.total || 0);
         }, 0);
+
+        const pendingTotal = Object.values(orders).reduce((sum, table) => {
+          if (!table || !table.items) return sum;
+          const gross = table.items.reduce((s, item) => s + item.price * item.qty, 0);
+          return sum + (table.thomasDiscount ? gross * 0.9 : gross);
+        }, 0);
+
+        useEffect(() => {
+          const allTotal = roundToCents(grandTotal + pendingTotal);
+          const rounded = Math.round(allTotal);
+          document.title = rounded > 0 ? `Mistral POS | €${rounded}` : "Mistral POS";
+        }, [grandTotal, pendingTotal]);
+
         const filteredMenu = menu.filter((item) => {
           if (category !== "All" && item.category !== category) return false;
           if (
@@ -1270,6 +1192,7 @@
                 alert("No valid menu items found in the file.");
                 return;
               }
+              if (!confirm(`Import ${items.length} menu items? This will replace the current menu.`)) return;
               setMenu(items);
               setEditingMenu(false);
             } catch (err) {
@@ -1340,7 +1263,11 @@
             receiptNo = takeNextReceiptNumber();
             assignedNow = true;
           }
-          const { lines, summary } = computeVatBreakdown(current.items);
+          const df = current.thomasDiscount ? 0.9 : 1;
+          const { lines, summary } = computeVatBreakdown(current.items, df);
+          const discountedTotals = current.thomasDiscount
+            ? { subtotal: roundToCents(totals.subtotal * 0.9), tax: roundToCents(totals.tax * 0.9), total: roundToCents(totals.total * 0.9) }
+            : totals;
           const ticket = {
             business: {
               name: settings.businessName,
@@ -1352,7 +1279,9 @@
             table: selectedTable,
             paymentMethod: current.cashPaid ? "Cash" : "Card/Other",
             comment: current.comment || "",
-            totals,
+            totals: discountedTotals,
+            discount: current.thomasDiscount ? 10 : 0,
+            tip: current.tip || 0,
             lines,
             vatSummary: summary,
             footerNote: settings.footerNote || "",
@@ -1365,6 +1294,71 @@
               return { ...prev, [selectedTable]: table };
             });
           }
+        }
+
+        function buildTicketForCurrent() {
+          if (!current.items.length) return null;
+          let receiptNo = current.receiptNo;
+          let assignedNow = false;
+          if (!receiptNo) {
+            receiptNo = takeNextReceiptNumber();
+            assignedNow = true;
+          }
+          const df = current.thomasDiscount ? 0.9 : 1;
+          const { lines, summary } = computeVatBreakdown(current.items, df);
+          const discountedTotals = current.thomasDiscount
+            ? { subtotal: roundToCents(totals.subtotal * 0.9), tax: roundToCents(totals.tax * 0.9), total: roundToCents(totals.total * 0.9) }
+            : totals;
+          const ticket = {
+            business: { name: settings.businessName, address: settings.businessAddress, vatNumber: settings.vatNumber },
+            receiptNo, timestamp: new Date().toISOString(), table: selectedTable,
+            paymentMethod: current.cashPaid ? "Cash" : "Card/Other",
+            comment: current.comment || "", totals: discountedTotals, discount: current.thomasDiscount ? 10 : 0, tip: current.tip || 0, lines, vatSummary: summary, footerNote: settings.footerNote || "",
+          };
+          if (assignedNow) {
+            setOrders((prev) => {
+              const table = cloneTableState(prev);
+              table.receiptNo = receiptNo;
+              return { ...prev, [selectedTable]: table };
+            });
+          }
+          return ticket;
+        }
+
+        function shareVatTicketForCurrent() {
+          const ticket = buildTicketForCurrent();
+          if (!ticket) { alert("No items in the order."); return; }
+          shareVatTicketPDF(ticket, { format: "receipt" });
+        }
+
+        function buildTicketFromOverview(index) {
+          const order = overview[index];
+          if (!order || !order.items?.length) return null;
+          let assignedNo = order.receiptNo;
+          if (!assignedNo) {
+            assignedNo = takeNextReceiptNumber();
+            setOverview((prev) => {
+              const copy = [...prev];
+              copy[index] = { ...prev[index], receiptNo: assignedNo };
+              return copy;
+            });
+          }
+          const df = order.thomasDiscount ? 0.9 : 1;
+          const { lines, summary } = computeVatBreakdown(order.items, df);
+          return {
+            business: { name: settings.businessName, address: settings.businessAddress, vatNumber: settings.vatNumber },
+            receiptNo: assignedNo, timestamp: order.timestamp, table: order.table,
+            paymentMethod: order.cashPaid ? "Cash" : "Card/Other",
+            discount: order.thomasDiscount ? 10 : 0,
+            tip: order.tip || 0,
+            comment: order.comment || "", totals: order.totals, lines, vatSummary: summary, footerNote: settings.footerNote || "",
+          };
+        }
+
+        function shareVatTicketFromOverview(index) {
+          const ticket = buildTicketFromOverview(index);
+          if (!ticket) { alert("No items on this order."); return; }
+          shareVatTicketPDF(ticket, { format: "receipt" });
         }
 
         function downloadVatTicketFromOverview(index) {
@@ -1389,7 +1383,8 @@
               return copy;
             });
           }
-          const { lines, summary } = computeVatBreakdown(order.items);
+          const df = order.thomasDiscount ? 0.9 : 1;
+          const { lines, summary } = computeVatBreakdown(order.items, df);
           const ticket = {
             business: {
               name: settings.businessName,
@@ -1400,6 +1395,8 @@
             timestamp: order.timestamp,
             table: order.table,
             paymentMethod: order.cashPaid ? "Cash" : "Card/Other",
+            discount: order.thomasDiscount ? 10 : 0,
+            tip: order.tip || 0,
             comment: order.comment || "",
             totals: order.totals,
             lines,
@@ -1407,6 +1404,22 @@
             footerNote: settings.footerNote || "",
           };
           downloadVatTicketPDF(ticket, { format: "receipt" });
+        }
+
+        function handleVatTicket(index) {
+          if (settings.pdfMode === "download") {
+            downloadVatTicketFromOverview(index);
+          } else {
+            shareVatTicketFromOverview(index);
+          }
+        }
+
+        function handleVatTicketForCurrent() {
+          if (settings.pdfMode === "download") {
+            downloadVatTicketForCurrent();
+          } else {
+            shareVatTicketForCurrent();
+          }
         }
 
         return (
@@ -1603,40 +1616,40 @@
                         ))}
                       </ul>
                     )}
-                    <div className="mt-3 bg-neutral-50 dark:bg-neutral-900 rounded-lg p-3 space-y-1">
-                      <div className="flex justify-between text-sm">
-                        <span>Subtotal (excl. VAT)</span>
-                        <span>{eur(roundToCents(totals.subtotal))}</span>
-                      </div>
-                      <div className="flex justify-between text-sm">
-                        <span>VAT</span>
-                        <span>{eur(roundToCents(totals.tax))}</span>
-                      </div>
-                      {current.thomasDiscount && (
-                        <div className="flex justify-between text-sm text-red-500">
-                          <span>Thomas discount (10%)</span>
-                          <span>-{eur(roundToCents(totals.total * 0.1))}</span>
-                        </div>
-                      )}
-                      <div className="flex justify-between font-bold text-lg pt-2 border-t border-neutral-200 dark:border-neutral-700">
-                        <span>Total (incl. VAT)</span>
-                        <span>
-                          {eur(
-                            roundToCents(
-                              current.thomasDiscount
-                                ? totals.total * 0.9
-                                : totals.total,
-                            ),
+                    {(() => {
+                      const df = current.thomasDiscount ? 0.9 : 1;
+                      const netAfter = roundToCents(totals.subtotal * df);
+                      const taxAfter = roundToCents(totals.tax * df);
+                      const totalAfter = roundToCents(totals.total * df);
+                      return (
+                        <div className="mt-3 bg-neutral-50 dark:bg-neutral-900 rounded-lg p-3 space-y-1">
+                          {current.thomasDiscount && (
+                            <div className="flex justify-between text-sm text-red-500">
+                              <span>Thomas discount (10%)</span>
+                              <span>-{eur(roundToCents(totals.total * 0.1))}</span>
+                            </div>
                           )}
-                        </span>
-                      </div>
-                      {(current.tip || 0) > 0 && (
-                        <div className="flex justify-between text-sm text-emerald-600 dark:text-emerald-400">
-                          <span>Tip</span>
-                          <span>{eur(current.tip)}</span>
+                          <div className="flex justify-between text-sm">
+                            <span>Subtotal (excl. VAT)</span>
+                            <span>{eur(netAfter)}</span>
+                          </div>
+                          <div className="flex justify-between text-sm">
+                            <span>VAT</span>
+                            <span>{eur(taxAfter)}</span>
+                          </div>
+                          <div className="flex justify-between font-bold text-lg pt-2 border-t border-neutral-200 dark:border-neutral-700">
+                            <span>Total (incl. VAT)</span>
+                            <span>{eur(totalAfter)}</span>
+                          </div>
+                          {(current.tip || 0) > 0 && (
+                            <div className="flex justify-between text-sm text-emerald-600 dark:text-emerald-400">
+                              <span>Tip</span>
+                              <span>{eur(current.tip)}</span>
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </div>
+                      );
+                    })()}
                     <div className="mt-3 space-y-2">
                       <div className="flex items-center justify-between">
                         <label className="flex items-center gap-2">
@@ -1743,10 +1756,10 @@
                     </div>
                     <div className="mt-3 space-y-2">
                       <button
-                        onClick={downloadVatTicketForCurrent}
-                        className="w-full px-4 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-white font-medium shadow-sm"
+                        onClick={handleVatTicketForCurrent}
+                        className="w-full px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-sm text-sm"
                       >
-                        Download VAT Ticket (PDF)
+                        VAT Ticket (PDF)
                       </button>
                       <div className="grid grid-cols-2 gap-2">
                         <button
@@ -1779,7 +1792,7 @@
               {tab === "overview" && (
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <h2 className="font-semibold">Closed Orders Overview</h2>
+                    <h2 className="font-semibold">Closed Orders</h2>
                     <div className="flex gap-2">
                       <button
                         onClick={exportExcel}
@@ -1799,7 +1812,7 @@
                       </button>
                     </div>
                   </div>
-                  {overview.length === 0 ? (
+                  {overview.length === 0 && Object.values(orders).every(t => !t || !t.items || t.items.length === 0) ? (
                     <div className="flex flex-col items-center justify-center py-8 text-neutral-400 dark:text-neutral-500">
                       <svg
                         className="w-12 h-12 mb-2"
@@ -1815,86 +1828,89 @@
                         />
                       </svg>
                       <div className="text-sm font-medium">
-                        No closed orders yet
+                        No orders yet
                       </div>
                       <div className="text-xs">
                         Close an order to see it here
                       </div>
                     </div>
                   ) : (
-                    <ul className="space-y-2">
-                      {overview.map((order, idx) => (
-                        <li
-                          key={idx}
-                          className="border border-neutral-200 dark:border-neutral-700 rounded-xl p-3 bg-white dark:bg-neutral-800 shadow-sm"
-                        >
-                          <div className="font-medium flex items-center gap-2 flex-wrap">
-                            <span>
-                              Table {order.table},{" "}
-                              {new Date(order.timestamp).toLocaleString()}
-                            </span>
-                            {order.cashPaid && (
-                              <span className="text-green-600 dark:text-green-400 font-bold">
-                                [CASH]
-                              </span>
-                            )}
-                            {order.receiptNo && (
-                              <span className="text-xs text-neutral-500 dark:text-neutral-400">
-                                #{order.receiptNo}
-                              </span>
-                            )}
-                            <button
-                              onClick={() => downloadVatTicketFromOverview(idx)}
-                              className="text-sm px-2.5 py-1 rounded-lg bg-neutral-800 dark:bg-neutral-600 hover:bg-neutral-700 dark:hover:bg-neutral-500 text-white font-medium"
-                            >
-                              PDF
-                            </button>
-                            <button
-                              onClick={() => reopenOrder(idx)}
-                              className="text-sm px-2.5 py-1 rounded-lg border border-neutral-300 dark:border-neutral-600 hover:bg-neutral-200 dark:hover:bg-neutral-700 font-medium"
-                            >
-                              Reopen
-                            </button>
-                          </div>
-                          <div className="text-sm text-neutral-600 dark:text-neutral-400">
-                            Total:{" "}
-                            {eur(
-                              roundToCents(
-                                order.thomasDiscount
-                                  ? order.totals.total * 0.9
-                                  : order.totals.total,
-                              ),
-                            )}{" "}
-                            (VAT: {eur(roundToCents(order.totals.tax))})
-                            {order.thomasDiscount && (
-                              <span className="text-red-500"> -10%</span>
-                            )}
-                            {(order.tip || 0) > 0 && (
-                              <span className="text-emerald-600 dark:text-emerald-400">
-                                {" "}
-                                + {eur(order.tip)} tip
-                              </span>
-                            )}
-                          </div>
-                          {order.comment && (
-                            <div className="text-sm text-neutral-500 dark:text-neutral-400 mt-1">
-                              Comment: {order.comment}
-                            </div>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
+                    <table className="w-full text-sm" style={{borderSpacing: "0 3px", borderCollapse: "separate"}}>
+                      {overview.length > 0 && (
+                        <tbody>
+                          {overview.map((order, idx) => {
+                            const itemCount = (order.items || []).reduce((s, i) => s + i.qty, 0);
+                            return (
+                            <tr key={idx} className="shadow-sm">
+                              <td className="py-2 pl-3 font-medium rounded-l-lg border-y border-l border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800">T{order.table}</td>
+                              <td className="py-2 text-neutral-500 dark:text-neutral-400 text-xs border-y border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800">{itemCount} items</td>
+                              <td className="py-2 font-semibold text-right border-y border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800" style={{paddingRight:2}}>{eur(roundToCents(order.totals.total))}</td>
+                              <td className="py-2 text-xs border-y border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800" style={{whiteSpace:"nowrap",paddingLeft:4}}>
+                                {order.thomasDiscount && <span className="text-neutral-500">incl. -10%</span>}
+                                {(order.tip || 0) > 0 && <span className="text-emerald-600 dark:text-emerald-400 ml-1">+ {eur(order.tip)} tip</span>}
+                              </td>
+                              <td className="py-2 border-y border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800">
+                                <span className={order.cashPaid ? "text-green-600 dark:text-green-400 text-xs font-bold" : "text-blue-600 dark:text-blue-400 text-xs font-bold"}>
+                                  {order.cashPaid ? "Cash" : "Payconiq"}
+                                </span>
+                              </td>
+                              <td className="py-2 pr-3 text-right rounded-r-lg border-y border-r border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800">
+                                <span className="inline-flex items-center gap-2">
+                                  <span className="text-neutral-400 dark:text-neutral-500 text-xs">{new Date(order.timestamp).toLocaleTimeString()}</span>
+                                  <button onClick={() => handleVatTicket(idx)} className="text-xs px-2 py-0.5 rounded border border-neutral-300 dark:border-neutral-600 hover:bg-neutral-100 dark:hover:bg-neutral-700 font-medium">VAT Ticket</button>
+                                  <button onClick={() => reopenOrder(idx)} className="text-xs px-2 py-0.5 rounded border border-neutral-300 dark:border-neutral-600 hover:bg-neutral-100 dark:hover:bg-neutral-700 font-medium">Reopen</button>
+                                </span>
+                              </td>
+                            </tr>
+                            );
+                          })}
+                        </tbody>
+                      )}
+                      {(() => {
+                        const openTables = Object.entries(orders).filter(([, t]) => t && t.items && t.items.length > 0);
+                        if (openTables.length === 0) return null;
+                        return (
+                          <tbody>
+                            <tr>
+                              <td colSpan="6" className="pt-4 pb-1 pl-1 font-semibold text-base text-amber-600 dark:text-amber-400">Pending Orders</td>
+                            </tr>
+                            {openTables.map(([tableNum, table]) => {
+                              const gross = table.items.reduce((s, item) => s + item.price * item.qty, 0);
+                              const itemCount = table.items.reduce((s, i) => s + i.qty, 0);
+                              return (
+                                <tr key={tableNum} className="shadow-sm">
+                                  <td className="py-2 pl-3 font-medium rounded-l-lg border-y border-l border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20">T{tableNum}</td>
+                                  <td className="py-2 text-neutral-500 dark:text-neutral-400 text-xs border-y border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20">{itemCount} items</td>
+                                  <td className="py-2 font-semibold text-right border-y border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20" style={{paddingRight:2}}>{eur(roundToCents(gross))}</td>
+                                  <td className="py-2 border-y border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20" style={{paddingLeft:4}}></td>
+                                  <td className="py-2 border-y border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20"></td>
+                                  <td className="py-2 pr-3 rounded-r-lg border-y border-r border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20"></td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        );
+                      })()}
+                      <tfoot>
+                        <tr><td colSpan="6" style={{height:8}}></td></tr>
+                        <tr className="bg-neutral-800 dark:bg-neutral-700 text-white font-semibold text-lg">
+                          <td className="py-3 pl-3 rounded-l-xl" colSpan="2">Grand Total</td>
+                          <td className="py-3 text-right" style={{paddingRight:2}}>{eur(roundToCents(grandTotal + pendingTotal))}</td>
+                          <td className="py-3 rounded-r-xl" colSpan="3"></td>
+                        </tr>
+                      </tfoot>
+                    </table>
                   )}
-                  <div className="mt-4 bg-neutral-800 dark:bg-neutral-700 text-white rounded-xl px-4 py-3 font-semibold text-lg flex justify-between">
-                    <span>Grand Total</span>
-                    <span>{eur(roundToCents(grandTotal))}</span>
-                  </div>
                 </div>
               )}
               {tab === "analytics" &&
                 (() => {
                   const itemStats = {};
-                  overview.forEach((order) => {
+                  const allOrderSources = [
+                    ...overview,
+                    ...Object.values(orders).filter((t) => t && t.items && t.items.length > 0),
+                  ];
+                  allOrderSources.forEach((order) => {
                     (order.items || []).forEach((item) => {
                       const key = item.name;
                       if (!itemStats[key])
@@ -1909,32 +1925,48 @@
                   const byRevenue = Object.values(itemStats).sort(
                     (a, b) => b.revenue - a.revenue,
                   );
-                  const effectiveTotal = (o) => {
-                    const t = o?.totals?.total || 0;
-                    return o.thomasDiscount ? t * 0.9 : t;
-                  };
-                  const totalRevenue = overview.reduce(
-                    (s, o) => s + effectiveTotal(o),
+                  const openTables = Object.entries(orders).filter(([, t]) => t && t.items && t.items.length > 0);
+                  const pendingRevenue = openTables.reduce((s, [, t]) => {
+                    const gross = t.items.reduce((a, item) => a + item.price * item.qty, 0);
+                    return s + (t.thomasDiscount ? gross * 0.9 : gross);
+                  }, 0);
+                  const closedRevenue = overview.reduce(
+                    (s, o) => s + (o?.totals?.total || 0),
                     0,
                   );
-                  const totalDiscount = overview.reduce(
-                    (s, o) =>
-                      s +
-                      (o.thomasDiscount ? (o?.totals?.total || 0) * 0.1 : 0),
+                  const totalRevenue = closedRevenue + pendingRevenue;
+                  const closedDiscount = overview.reduce(
+                    (s, o) => {
+                      if (!o.thomasDiscount) return s;
+                      return s + (o.totals.total / 0.9 - o.totals.total);
+                    },
                     0,
                   );
+                  const pendingDiscount = openTables.reduce((s, [, t]) => {
+                    if (!t.thomasDiscount) return s;
+                    const gross = t.items.reduce((a, item) => a + item.price * item.qty, 0);
+                    return s + gross * 0.1;
+                  }, 0);
+                  const totalDiscount = closedDiscount + pendingDiscount;
                   const totalTips = overview.reduce(
                     (s, o) => s + (o?.tip || 0),
                     0,
                   );
-                  const cashOrders = overview.filter((o) => o.cashPaid);
-                  const cardOrders = overview.filter((o) => !o.cashPaid);
+                  const allOrders = [
+                    ...overview.map(o => ({ total: o?.totals?.total || 0, cashPaid: o.cashPaid })),
+                    ...openTables.map(([, t]) => {
+                      const gross = t.items.reduce((a, item) => a + item.price * item.qty, 0);
+                      return { total: t.thomasDiscount ? gross * 0.9 : gross, cashPaid: t.cashPaid };
+                    }),
+                  ];
+                  const cashOrders = allOrders.filter((o) => o.cashPaid);
+                  const cardOrders = allOrders.filter((o) => !o.cashPaid);
                   const cashTotal = cashOrders.reduce(
-                    (s, o) => s + effectiveTotal(o),
+                    (s, o) => s + o.total,
                     0,
                   );
                   const cardTotal = cardOrders.reduce(
-                    (s, o) => s + effectiveTotal(o),
+                    (s, o) => s + o.total,
                     0,
                   );
                   const tableStats = {};
@@ -1942,7 +1974,14 @@
                     if (!tableStats[o.table])
                       tableStats[o.table] = { orders: 0, revenue: 0 };
                     tableStats[o.table].orders += 1;
-                    tableStats[o.table].revenue += effectiveTotal(o);
+                    tableStats[o.table].revenue += (o?.totals?.total || 0);
+                  });
+                  openTables.forEach(([tableNum, t]) => {
+                    if (!tableStats[tableNum])
+                      tableStats[tableNum] = { orders: 0, revenue: 0 };
+                    tableStats[tableNum].orders += 1;
+                    const gross = t.items.reduce((a, item) => a + item.price * item.qty, 0);
+                    tableStats[tableNum].revenue += (t.thomasDiscount ? gross * 0.9 : gross);
                   });
                   const tableRanking = Object.entries(tableStats)
                     .map(([t, s]) => ({ table: t, ...s }))
@@ -1981,13 +2020,17 @@
                       XLSX.utils.json_to_sheet([
                         {
                           Total_Revenue_EUR: roundToCents(totalRevenue),
+                          Closed_Revenue_EUR: roundToCents(closedRevenue),
+                          Pending_Revenue_EUR: roundToCents(pendingRevenue),
                           Total_Discount_EUR: roundToCents(totalDiscount),
                           Total_Tips_EUR: roundToCents(totalTips),
                           Cash_EUR: roundToCents(cashTotal),
                           Card_EUR: roundToCents(cardTotal),
                           Cash_Orders: cashOrders.length,
                           Card_Orders: cardOrders.length,
-                          Total_Orders: overview.length,
+                          Closed_Orders: overview.length,
+                          Pending_Orders: openTables.length,
+                          Total_Orders: overview.length + openTables.length,
                         },
                       ]),
                       "Summary",
@@ -2006,11 +2049,11 @@
                           Export Analytics
                         </button>
                       </div>
-                      {overview.length === 0 ? (
+                      {overview.length === 0 && openTables.length === 0 ? (
                         <div className="flex flex-col items-center justify-center py-8 text-neutral-400 dark:text-neutral-500">
                           <div className="text-sm font-medium">No data yet</div>
                           <div className="text-xs">
-                            Close some orders to see analytics
+                            Add or close orders to see analytics
                           </div>
                         </div>
                       ) : (
@@ -2021,7 +2064,7 @@
                               <div className="flex justify-between">
                                 <span>Total orders</span>
                                 <span className="font-medium">
-                                  {overview.length}
+                                  {overview.length + openTables.length} <span className="text-xs text-neutral-500">({overview.length} closed, {openTables.length} pending)</span>
                                 </span>
                               </div>
                               <div className="flex justify-between">
@@ -2032,7 +2075,7 @@
                               </div>
                               {totalDiscount > 0 && (
                                 <div className="flex justify-between">
-                                  <span>Thomas discounts</span>
+                                  <span>Discounts</span>
                                   <span className="font-medium text-red-500">
                                     -{eur(roundToCents(totalDiscount))}
                                   </span>
@@ -2051,7 +2094,7 @@
                                 </span>
                               </div>
                               <div className="flex justify-between">
-                                <span>Card ({cardOrders.length} orders)</span>
+                                <span>Payconiq ({cardOrders.length} orders)</span>
                                 <span className="font-medium">
                                   {eur(roundToCents(cardTotal))}
                                 </span>
@@ -2155,7 +2198,7 @@
                         Export Excel
                       </button>
                       <button
-                        onClick={() => setMenu(DEFAULT_MENU)}
+                        onClick={() => { if (confirm("Reset menu to defaults? All custom items will be lost.")) setMenu(DEFAULT_MENU); }}
                         className="px-3 py-1.5 rounded-lg text-sm border border-red-300 text-red-600 dark:border-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
                       >
                         Reset to Default
