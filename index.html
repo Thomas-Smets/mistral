@@ -397,7 +397,7 @@
       ];
       // MENU_END
 
-      const APP_VERSION = "0.2.0";
+      const APP_VERSION = "0.2.1";
 
       // --- GitHub publish config ---
       const GITHUB_CLIENT_ID = "Iv23liaCCgim2l2klAqT";
@@ -1046,12 +1046,20 @@
             reject(new Error("Popup blocked. Please allow popups."));
             return;
           }
+          let settled = false;
+          const proxyOrigin = new URL(GITHUB_OAUTH_PROXY).origin;
           function onMessage(event) {
+            if (event.origin !== proxyOrigin) return;
+            if (settled) return;
             if (event.data && event.data.access_token) {
+              settled = true;
+              clearInterval(interval);
               window.removeEventListener("message", onMessage);
               setGitHubToken(event.data.access_token);
               resolve(event.data.access_token);
             } else if (event.data && event.data.error) {
+              settled = true;
+              clearInterval(interval);
               window.removeEventListener("message", onMessage);
               reject(
                 new Error(event.data.error_description || event.data.error),
@@ -1064,7 +1072,7 @@
               if (popup.closed) {
                 clearInterval(interval);
                 window.removeEventListener("message", onMessage);
-                if (!getGitHubToken()) {
+                if (!settled) {
                   reject(new Error("Auth cancelled."));
                 }
               }
@@ -1074,6 +1082,11 @@
       }
 
       async function publishMenuToGitHub(menuItems) {
+        if (!window.XLSX) {
+          throw new Error(
+            "XLSX library not loaded. Check your internet connection.",
+          );
+        }
         let token = getGitHubToken();
         if (!token) {
           token = await startGitHubAuth();
@@ -1132,6 +1145,11 @@
           if (putResp.status === 401) {
             localStorage.removeItem("github_token");
             throw new Error("GitHub token expired. Please try again.");
+          }
+          if (putResp.status === 403) {
+            throw new Error(
+              "Access denied. Make sure the GitHub App is installed on the repository.",
+            );
           }
           throw new Error(err.message || "Failed to publish menu.");
         }
@@ -2791,7 +2809,15 @@
                         Import Excel
                       </button>
                       <button
-                        onClick={() => exportMenuExcel(menu)}
+                        onClick={() => {
+                          if (
+                            !confirm(
+                              "This downloads the menu to this device only. To update the menu for all devices, use Publish to site instead.\n\nContinue with download?",
+                            )
+                          )
+                            return;
+                          exportMenuExcel(menu);
+                        }}
                         className="px-3 py-1.5 rounded-lg text-sm border border-neutral-300 dark:border-neutral-600 hover:bg-neutral-200 dark:hover:bg-neutral-700"
                       >
                         Export Excel
@@ -2799,6 +2825,12 @@
                       {GITHUB_CLIENT_ID && (
                         <button
                           onClick={async () => {
+                            if (
+                              !confirm(
+                                "Publish the current menu to the live site? This will update the menu for all devices and future sessions.",
+                              )
+                            )
+                              return;
                             setPublishing(true);
                             try {
                               await publishMenuToGitHub(menu);
