@@ -102,6 +102,7 @@
       }
 
       // --- Menu items ---
+      // MENU_START
       const DEFAULT_MENU = [
         {
           id: "i1",
@@ -394,8 +395,16 @@
           vat: 0.21,
         },
       ];
+      // MENU_END
 
       const APP_VERSION = "0.1.0";
+
+      // --- GitHub publish config ---
+      const GITHUB_CLIENT_ID = "Iv23liaCCgim2l2klAqT";
+      const GITHUB_OAUTH_PROXY =
+        "https://mistral-oauth-proxy.thomass-smets.workers.dev";
+      const GITHUB_REPO = "Thomas-Smets/mistral";
+      const GITHUB_MENU_PATH = "menu.xlsx";
 
       const TABLES = Array.from({ length: 20 }, (_, i) => String(i + 1));
 
@@ -999,6 +1008,136 @@
         XLSX.writeFile(wb, "Menu.xlsx");
       }
 
+      // --- GitHub OAuth + Publish ---
+      function getGitHubToken() {
+        try {
+          return localStorage.getItem("github_token") || null;
+        } catch {
+          return null;
+        }
+      }
+
+      function setGitHubToken(token) {
+        try {
+          localStorage.setItem("github_token", token);
+        } catch {}
+      }
+
+      function startGitHubAuth() {
+        return new Promise((resolve, reject) => {
+          if (!GITHUB_CLIENT_ID || !GITHUB_OAUTH_PROXY) {
+            reject(new Error("GitHub OAuth not configured."));
+            return;
+          }
+          const callbackUrl = GITHUB_OAUTH_PROXY + "/callback";
+          const authUrl =
+            "https://github.com/login/oauth/authorize" +
+            "?client_id=" +
+            encodeURIComponent(GITHUB_CLIENT_ID) +
+            "&scope=public_repo" +
+            "&redirect_uri=" +
+            encodeURIComponent(callbackUrl);
+          const popup = window.open(
+            authUrl,
+            "github_auth",
+            "width=600,height=700",
+          );
+          if (!popup) {
+            reject(new Error("Popup blocked. Please allow popups."));
+            return;
+          }
+          function onMessage(event) {
+            if (event.data && event.data.access_token) {
+              window.removeEventListener("message", onMessage);
+              setGitHubToken(event.data.access_token);
+              resolve(event.data.access_token);
+            } else if (event.data && event.data.error) {
+              window.removeEventListener("message", onMessage);
+              reject(
+                new Error(event.data.error_description || event.data.error),
+              );
+            }
+          }
+          window.addEventListener("message", onMessage);
+          const interval = setInterval(() => {
+            try {
+              if (popup.closed) {
+                clearInterval(interval);
+                window.removeEventListener("message", onMessage);
+                if (!getGitHubToken()) {
+                  reject(new Error("Auth cancelled."));
+                }
+              }
+            } catch {}
+          }, 500);
+        });
+      }
+
+      async function publishMenuToGitHub(menuItems) {
+        let token = getGitHubToken();
+        if (!token) {
+          token = await startGitHubAuth();
+        }
+        const headers = {
+          Authorization: "Bearer " + token,
+          Accept: "application/vnd.github.v3+json",
+        };
+        const wb = XLSX.utils.book_new();
+        const rows = menuItems.map((item) => ({
+          id: item.id,
+          name: item.name,
+          category: item.category,
+          price: item.price,
+          vat: item.vat,
+        }));
+        XLSX.utils.book_append_sheet(
+          wb,
+          XLSX.utils.json_to_sheet(rows),
+          "Menu",
+        );
+        const xlsxData = XLSX.write(wb, { type: "base64", bookType: "xlsx" });
+        let sha = null;
+        try {
+          const existing = await fetch(
+            "https://api.github.com/repos/" +
+              GITHUB_REPO +
+              "/contents/" +
+              GITHUB_MENU_PATH +
+              "?ref=main",
+            { headers },
+          );
+          if (existing.ok) {
+            const data = await existing.json();
+            sha = data.sha;
+          }
+        } catch {}
+        const putResp = await fetch(
+          "https://api.github.com/repos/" +
+            GITHUB_REPO +
+            "/contents/" +
+            GITHUB_MENU_PATH,
+          {
+            method: "PUT",
+            headers,
+            body: JSON.stringify({
+              message: "Update menu",
+              content: xlsxData,
+              sha: sha || undefined,
+              branch: "main",
+            }),
+          },
+        );
+        if (!putResp.ok) {
+          const err = await putResp.json().catch(() => ({}));
+          if (putResp.status === 401) {
+            localStorage.removeItem("github_token");
+            throw new Error("GitHub token expired. Please try again.");
+          }
+          throw new Error(err.message || "Failed to publish menu.");
+        }
+        return true;
+      }
+
       function App() {
         const [menu, setMenu] = useLocalStorage("pos_menu", DEFAULT_MENU);
         const [orders, setOrders] = useLocalStorage("orders", {});
@@ -1017,6 +1156,7 @@
         const [diag, setDiag] = useState(getLibDiag());
         const [darkMode, setDarkMode] = useLocalStorage("pos_dark_mode", false);
         const [editingMenu, setEditingMenu] = useState(false);
+        const [publishing, setPublishing] = useState(false);
         const [editDraft, setEditDraft] = useState(null);
         const fileInputRef = useRef(null);
         const [qrDataUrl, setQrDataUrl] = useState(null);
@@ -2656,6 +2796,27 @@
                       >
                         Export Excel
                       </button>
+                      {GITHUB_CLIENT_ID && (
+                        <button
+                          onClick={async () => {
+                            setPublishing(true);
+                            try {
+                              await publishMenuToGitHub(menu);
+                              alert(
+                                "Menu published! Changes go live in ~1 minute.",
+                              );
+                            } catch (err) {
+                              alert("Publish failed: " + err.message);
+                            } finally {
+                              setPublishing(false);
+                            }
+                          }}
+                          disabled={publishing}
+                          className="px-3 py-1.5 rounded-lg text-sm bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-50"
+                        >
+                          {publishing ? "Publishing..." : "Publish to site"}
+                        </button>
+                      )}
                       <button
                         onClick={() => {
                           if (
