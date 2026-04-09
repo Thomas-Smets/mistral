@@ -1718,6 +1718,52 @@
               )}
               {tab === "orders" && (
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {/* MOBILE TABLE SELECTOR + PAY BUTTON */}
+                  <div className="md:hidden sticky top-0 z-20 bg-neutral-50 dark:bg-neutral-900 -mx-4 px-4 py-2 border-b border-neutral-200 dark:border-neutral-700 flex items-center gap-2">
+                    <select
+                      value={selectedTable}
+                      onChange={(e) => setSelectedTable(e.target.value)}
+                      className="flex-1 border dark:border-neutral-600 rounded px-2 py-1.5 dark:bg-neutral-700 text-sm font-medium"
+                    >
+                      {TABLES.map((tableNum) => {
+                        const tableItems = (orders[tableNum] || { items: [] })
+                          .items;
+                        const tableTotal = tableItems.reduce(
+                          (s, i) => s + i.price * i.qty,
+                          0,
+                        );
+                        return (
+                          <option key={tableNum} value={tableNum}>
+                            Table {tableNum}
+                            {tableTotal > 0
+                              ? ` - €${Math.round(tableTotal)}`
+                              : ""}
+                          </option>
+                        );
+                      })}
+                    </select>
+                    {current.items.length > 0 && (
+                      <button
+                        onClick={() => {
+                          const el = document.getElementById(
+                            "order-payment-section",
+                          );
+                          if (el) el.scrollIntoView({ behavior: "smooth" });
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm font-medium whitespace-nowrap"
+                      >
+                        Pay (
+                        {eur(
+                          roundToCents(
+                            current.thomasDiscount
+                              ? totals.total * 0.9
+                              : totals.total,
+                          ),
+                        )}
+                        )
+                      </button>
+                    )}
+                  </div>
                   {/* MENU */}
                   <div className="md:col-span-2">
                     <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
@@ -1904,7 +1950,7 @@
                         </div>
                       );
                     })()}
-                    <div className="mt-3 space-y-2">
+                    <div id="order-payment-section" className="mt-3 space-y-2">
                       <div className="flex items-center justify-between">
                         <label className="flex items-center gap-2">
                           <input
