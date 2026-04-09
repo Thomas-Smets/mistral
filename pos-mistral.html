@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>POS App: Mistral (VAT PDF Tickets)</title>
+    <title>Mistral POS</title>
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
@@ -18,6 +18,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
+        darkMode: "class",
         theme: {
           extend: {
             fontFamily: { sans: ["Inter", "system-ui", "sans-serif"] },
@@ -31,6 +32,8 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <!-- XLSX for exports -->
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- QR code generation -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
     <!-- jsPDF + AutoTable for PDF receipts -->
     <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.3/dist/jspdf.plugin.autotable.min.js"></script>
@@ -56,13 +59,26 @@
         transform: scale(0.96);
         filter: brightness(0.92);
       }
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateY(-8px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      .animate-slide-in {
+        animation: slideIn 0.2s ease-out;
+      }
     </style>
   </head>
-  <body class="bg-neutral-100">
+  <body class="bg-neutral-100 dark:bg-neutral-900 dark:text-neutral-100">
     <noscript>This POS application requires JavaScript to run.</noscript>
     <div id="root"></div>
     <script type="text/babel">
-      const { useState, useEffect, useMemo } = React;
+      const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
       // --- small diag helper to check libraries ---
       function getLibDiag() {
@@ -405,17 +421,69 @@
         return [value, setValue];
       }
 
+      function SwipeableItem({ onSwipe, children }) {
+        const startX = useRef(0);
+        const currentX = useRef(0);
+        const swiping = useRef(false);
+        const elRef = useRef(null);
+        const THRESHOLD = 80;
+
+        const onTouchStart = useCallback((e) => {
+          startX.current = e.touches[0].clientX;
+          currentX.current = startX.current;
+          swiping.current = true;
+        }, []);
+
+        const onTouchMove = useCallback((e) => {
+          if (!swiping.current) return;
+          currentX.current = e.touches[0].clientX;
+          const dx = currentX.current - startX.current;
+          if (dx < 0 && elRef.current) {
+            elRef.current.style.transform = `translateX(${Math.max(dx, -120)}px)`;
+            elRef.current.style.opacity = Math.max(1 + dx / 200, 0.4);
+          }
+        }, []);
+
+        const onTouchEnd = useCallback(() => {
+          if (!swiping.current) return;
+          swiping.current = false;
+          const dx = currentX.current - startX.current;
+          if (dx < -THRESHOLD) {
+            if (elRef.current) {
+              elRef.current.style.transform = "translateX(-100%)";
+              elRef.current.style.opacity = "0";
+            }
+            setTimeout(onSwipe, 150);
+          } else if (elRef.current) {
+            elRef.current.style.transform = "";
+            elRef.current.style.opacity = "";
+          }
+        }, [onSwipe]);
+
+        return (
+          <div
+            ref={elRef}
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            onTouchEnd={onTouchEnd}
+            style={{ transition: "transform 0.15s ease, opacity 0.15s ease" }}
+          >
+            {children}
+          </div>
+        );
+      }
+
       function Tabs({ tab, setTab }) {
         return (
-          <div className="mb-4 flex gap-1 border-b border-neutral-300">
-            {["orders", "overview"].map((tabName) => (
+          <div className="mb-4 flex gap-1 border-b border-neutral-300 dark:border-neutral-600">
+            {["orders", "overview", "analytics", "menu"].map((tabName) => (
               <button
                 key={tabName}
                 onClick={() => setTab(tabName)}
                 className={
                   tab === tabName
-                    ? "px-4 py-2 font-medium text-neutral-800 border-b-2 border-neutral-800 -mb-px"
-                    : "px-4 py-2 text-neutral-500 hover:text-neutral-700"
+                    ? "px-4 py-2 font-medium text-neutral-800 dark:text-neutral-100 border-b-2 border-neutral-800 dark:border-neutral-100 -mb-px"
+                    : "px-4 py-2 text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
                 }
               >
                 {tabName[0].toUpperCase() + tabName.slice(1)}
@@ -433,27 +501,29 @@
         receiptPrefix: "MS-",
         nextReceiptNumber: 1,
         footerNote: "Thank you for your visit!",
+        payconiqLink: "",
+        pdfMode: "share",
       };
 
       function formatReceiptNo(prefix, n) {
         return `${prefix}${String(n).padStart(5, "0")}`;
       }
 
-      function SettingsModal({ settings, setSettings, onClose }) {
+      function SettingsModal({ settings, setSettings, onClose, onRestore }) {
         const [form, setForm] = React.useState(settings);
         const update = (field, val) =>
           setForm((prev) => ({ ...prev, [field]: val }));
         const diag = getLibDiag();
         return (
           <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-            <div className="bg-white border rounded-xl p-4 w-[560px] max-w-[95vw]">
+            <div className="bg-white dark:bg-neutral-800 border dark:border-neutral-700 rounded-xl p-4 w-[560px] max-w-[95vw]">
               <h3 className="text-lg font-semibold mb-2">Business Settings</h3>
               <div className="grid grid-cols-1 gap-2">
                 <label className="text-sm" htmlFor="settings-business-name">
                   Business name
                   <input
                     id="settings-business-name"
-                    className="w-full border rounded px-2 py-1"
+                    className="w-full border dark:border-neutral-600 rounded px-2 py-1 dark:bg-neutral-700"
                     value={form.businessName}
                     onChange={(e) => update("businessName", e.target.value)}
                   />
@@ -462,7 +532,7 @@
                   Address
                   <input
                     id="settings-address"
-                    className="w-full border rounded px-2 py-1"
+                    className="w-full border dark:border-neutral-600 rounded px-2 py-1 dark:bg-neutral-700"
                     value={form.businessAddress}
                     onChange={(e) => update("businessAddress", e.target.value)}
                   />
@@ -471,7 +541,7 @@
                   VAT number
                   <input
                     id="settings-vat"
-                    className="w-full border rounded px-2 py-1"
+                    className="w-full border dark:border-neutral-600 rounded px-2 py-1 dark:bg-neutral-700"
                     value={form.vatNumber}
                     onChange={(e) => update("vatNumber", e.target.value)}
                   />
@@ -481,7 +551,7 @@
                     Receipt prefix
                     <input
                       id="settings-prefix"
-                      className="w-full border rounded px-2 py-1"
+                      className="w-full border dark:border-neutral-600 rounded px-2 py-1 dark:bg-neutral-700"
                       value={form.receiptPrefix}
                       onChange={(e) => update("receiptPrefix", e.target.value)}
                     />
@@ -490,7 +560,7 @@
                     Next number
                     <input
                       id="settings-next-number"
-                      className="w-full border rounded px-2 py-1"
+                      className="w-full border dark:border-neutral-600 rounded px-2 py-1 dark:bg-neutral-700"
                       type="number"
                       min={1}
                       value={form.nextReceiptNumber}
@@ -507,14 +577,121 @@
                   Footer note
                   <input
                     id="settings-footer"
-                    className="w-full border rounded px-2 py-1"
+                    className="w-full border dark:border-neutral-600 rounded px-2 py-1 dark:bg-neutral-700"
                     value={form.footerNote}
                     onChange={(e) => update("footerNote", e.target.value)}
                   />
                 </label>
+                <label className="text-sm" htmlFor="settings-payconiq">
+                  Payconiq link
+                  <input
+                    id="settings-payconiq"
+                    className="w-full border dark:border-neutral-600 rounded px-2 py-1 dark:bg-neutral-700"
+                    value={form.payconiqLink || ""}
+                    onChange={(e) => update("payconiqLink", e.target.value)}
+                    placeholder="https://payconiq.com/t/1/..."
+                  />
+                </label>
+                <label className="block text-sm">
+                  PDF VAT Ticket mode
+                  <select
+                    className="w-full border dark:border-neutral-600 rounded px-2 py-1 dark:bg-neutral-700 mt-1"
+                    value={form.pdfMode || "share"}
+                    onChange={(e) => update("pdfMode", e.target.value)}
+                  >
+                    <option value="share">Share (Mail, AirDrop, etc.)</option>
+                    <option value="download">Download</option>
+                  </select>
+                </label>
+              </div>
+              <div className="mt-3 pt-3 border-t border-neutral-200 dark:border-neutral-700">
+                <div className="text-sm font-medium mb-1">Backup / Restore</div>
+                <div className="flex gap-2 flex-wrap text-sm">
+                  <button
+                    onClick={() => {
+                      const backup = localStorage.getItem("pos_auto_backup");
+                      if (!backup) {
+                        alert("No auto-backup found.");
+                        return;
+                      }
+                      if (
+                        !confirm(
+                          "Restore auto-backup? This will replace all current data.",
+                        )
+                      )
+                        return;
+                      onRestore(JSON.parse(backup));
+                    }}
+                    className="px-3 py-1 border rounded hover:bg-neutral-100 dark:hover:bg-neutral-700 dark:border-neutral-600"
+                  >
+                    Restore Last Auto-backup
+                  </button>
+                  <label className="px-3 py-1 border rounded hover:bg-neutral-100 dark:hover:bg-neutral-700 dark:border-neutral-600 cursor-pointer">
+                    Restore from File
+                    <input
+                      type="file"
+                      accept=".json"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const reader = new FileReader();
+                        reader.onload = (evt) => {
+                          try {
+                            if (
+                              !confirm(
+                                "Restore from file? This will replace all current data.",
+                              )
+                            )
+                              return;
+                            onRestore(JSON.parse(evt.target.result));
+                          } catch (err) {
+                            alert("Failed to restore: " + err.message);
+                          }
+                        };
+                        reader.readAsText(file);
+                        e.target.value = "";
+                      }}
+                    />
+                  </label>
+                  <button
+                    onClick={() => {
+                      const backup = {
+                        orders: JSON.parse(
+                          localStorage.getItem("orders") || "{}",
+                        ),
+                        overview: JSON.parse(
+                          localStorage.getItem("overview") || "[]",
+                        ),
+                        menu: JSON.parse(
+                          localStorage.getItem("pos_menu") || "[]",
+                        ),
+                        settings: JSON.parse(
+                          localStorage.getItem("pos_settings") || "{}",
+                        ),
+                        exportedAt: new Date().toISOString(),
+                      };
+                      const blob = new Blob([JSON.stringify(backup, null, 2)], {
+                        type: "application/json",
+                      });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `POS_Backup_${new Date().toISOString().slice(0, 10)}.json`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                    className="px-3 py-1 border rounded hover:bg-neutral-100 dark:hover:bg-neutral-700 dark:border-neutral-600"
+                  >
+                    Download Backup
+                  </button>
+                </div>
+                <div className="text-xs text-neutral-400 mt-1">
+                  Auto-backup runs every 30s.
+                </div>
               </div>
               <div className="mt-3 flex items-center justify-between gap-2">
-                <div className="text-xs text-neutral-600">
+                <div className="text-xs text-neutral-600 dark:text-neutral-400">
                   <div>Diagnostics:</div>
                   <div>
                     React: {diag.reactOk ? "✓" : "✗"} · Babel:{" "}
@@ -531,7 +708,7 @@
                     Close
                   </button>
                   <button
-                    className="px-3 py-1 border rounded bg-blue-100 hover:bg-blue-200"
+                    className="px-3 py-1 border rounded bg-blue-100 hover:bg-blue-200 dark:bg-blue-700 dark:hover:bg-blue-600 dark:text-white dark:border-blue-600"
                     onClick={() => {
                       setSettings(form);
                       onClose();
@@ -547,7 +724,7 @@
       }
 
       // --- VAT breakdown helper ---
-      function computeVatBreakdown(items) {
+      function computeVatBreakdown(items, discountFactor = 1) {
         const summary = {};
         const lines = items.map((item) => {
           const gross = item.price * item.qty;
@@ -555,9 +732,9 @@
           const vatAmt = gross - net;
           const rate = item.vat;
           if (!summary[rate]) summary[rate] = { net: 0, vat: 0, gross: 0 };
-          summary[rate].net += net;
-          summary[rate].vat += vatAmt;
-          summary[rate].gross += gross;
+          summary[rate].net += net * discountFactor;
+          summary[rate].vat += vatAmt * discountFactor;
+          summary[rate].gross += gross * discountFactor;
           return {
             name: item.name,
             qty: item.qty,
@@ -578,32 +755,45 @@
 
       // --- PDF generator ---
       function downloadVatTicketPDF(ticket, opts = { format: "receipt" }) {
-        const jsPDFCtor = getJsPDFCtor();
-        if (!jsPDFCtor) {
-          alert(
-            "PDF engine (jsPDF) failed to load. Please check your internet connection or allow CDN scripts.",
-          );
+        const result = buildVatTicketDoc(ticket, opts);
+        if (!result) {
+          alert("PDF engine (jsPDF) failed to load.");
           return;
         }
-        const fmt = (n) =>
-          new Intl.NumberFormat(undefined, {
-            style: "currency",
-            currency: "EUR",
-          }).format(roundToCents(n));
-        const doc = new jsPDFCtor({
-          unit: "mm",
-          format: opts.format === "a4" ? "a4" : [80, 200],
-        });
-        if (typeof doc.autoTable !== "function") {
+        try {
+          result.doc.save(result.fileName);
+        } catch (e) {
           alert(
-            "jsPDF AutoTable plugin not loaded. PDF will not include tables. Please ensure CDN access.",
+            "Unable to download PDF. If you are in an in-app browser, try opening in Chrome/Edge/Safari.",
           );
         }
-        const pageWidth = doc.internal.pageSize.getWidth();
-        const marginX = 5;
-        let y = 8;
+      }
 
-        // Header
+      function buildVatTicketDoc(ticket, opts = { format: "receipt" }) {
+        const jsPDFCtor = getJsPDFCtor();
+        if (!jsPDFCtor) return null;
+        const fmt = (n) => {
+          const v = roundToCents(n).toFixed(2);
+          const [int, dec] = v.split(".");
+          const intFmt = int.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+          return intFmt + "." + dec;
+        };
+        const isReceipt = opts.format !== "a4";
+        // Estimate receipt height: header(30) + meta(12) + items(6 per line + 8 header) + totals(15) + vat(20) + footer(15) + margin(10)
+        const itemCount = ticket.lines ? ticket.lines.length : 0;
+        const vatRateCount = ticket.vatSummary
+          ? Object.keys(ticket.vatSummary).length
+          : 1;
+        const estimatedHeight = isReceipt
+          ? Math.max(120, 75 + itemCount * 6 + vatRateCount * 6 + 30)
+          : undefined;
+        const doc = new jsPDFCtor({
+          unit: "mm",
+          format: isReceipt ? [80, estimatedHeight] : "a4",
+        });
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const marginX = 4;
+        let y = 8;
         doc.setFontSize(13);
         doc.text(ticket.business.name || "Business", marginX, y);
         y += 5;
@@ -619,8 +809,6 @@
         doc.setDrawColor(150);
         doc.line(marginX, y, pageWidth - marginX, y);
         y += 3;
-
-        // Meta
         doc.setFontSize(9);
         if (ticket.receiptNo) {
           doc.text(`Receipt: ${ticket.receiptNo}`, marginX, y);
@@ -634,8 +822,6 @@
         y += 4;
         doc.text(`Table: ${ticket.table}`, marginX, y);
         y += 2;
-
-        // Items
         const itemsBody = ticket.lines.map((line) => [
           `${line.qty} × ${line.name}`,
           fmt(line.unitGross),
@@ -645,71 +831,62 @@
         if (typeof doc.autoTable === "function") {
           doc.autoTable({
             startY: y,
-            head: [["Item", "Unit (incl.)", "VAT", "Total"]],
+            margin: { left: marginX, right: marginX },
+            tableWidth: pageWidth - marginX * 2,
+            head: [["Item", "Unit € (incl.)", "VAT", "Total €"]],
             body: itemsBody,
             theme: "plain",
-            styles: { fontSize: 8, cellPadding: 1 },
+            styles: { fontSize: 8, cellPadding: 1, overflow: "linebreak" },
             headStyles: { fillColor: [245, 245, 245] },
             columnStyles: {
-              1: { halign: "right" },
-              2: { halign: "right" },
-              3: { halign: "right" },
+              0: { cellWidth: "auto" },
+              1: { halign: "right", cellWidth: 16 },
+              2: { halign: "right", cellWidth: 10 },
+              3: { halign: "right", cellWidth: 16 },
             },
           });
           y = doc.lastAutoTable.finalY + 2;
           doc.line(marginX, y, pageWidth - marginX, y);
           y += 2;
-        } else {
-          doc.text("Items:", marginX, y);
-          y += 4;
-          itemsBody.forEach((row) => {
-            doc.text(`${row[0]}  ${row[1]}  ${row[2]}  ${row[3]}`, marginX, y);
-            y += 4;
-          });
-          y += 2;
         }
-
-        // Totals
         if (typeof doc.autoTable === "function") {
+          const totalsBody = [];
+          if (ticket.discount && ticket.discountAmount) {
+            totalsBody.push([
+              `Discount (${ticket.discount}%)`,
+              `-${fmt(ticket.discountAmount)} €`,
+            ]);
+          }
+          totalsBody.push([
+            "Subtotal (excl. VAT)",
+            fmt(ticket.totals.subtotal) + " €",
+          ]);
+          totalsBody.push(["VAT total", fmt(ticket.totals.tax) + " €"]);
+          totalsBody.push([
+            { content: "Total (incl. VAT)", styles: { fontStyle: "bold" } },
+            {
+              content: fmt(ticket.totals.total) + " €",
+              styles: { fontStyle: "bold", halign: "right" },
+            },
+          ]);
           doc.autoTable({
             startY: y,
             theme: "plain",
-            styles: { fontSize: 9, cellPadding: { top: 0.5, bottom: 0.5 } },
-            body: [
-              ["Subtotal (excl. VAT)", fmt(ticket.totals.subtotal)],
-              ["VAT total", fmt(ticket.totals.tax)],
-              [
-                { content: "Total (incl. VAT)", styles: { fontStyle: "bold" } },
-                {
-                  content: fmt(ticket.totals.total),
-                  styles: { fontStyle: "bold", halign: "right" },
-                },
-              ],
-            ],
+            margin: { left: marginX, right: marginX },
+            tableWidth: pageWidth - marginX * 2,
+            styles: {
+              fontSize: 9,
+              cellPadding: { top: 0.5, bottom: 0.5, left: 1, right: 1 },
+              overflow: "linebreak",
+            },
+            body: totalsBody,
             columnStyles: {
-              0: { cellWidth: pageWidth - marginX * 2 - 34 },
-              1: { halign: "right", cellWidth: 34 },
+              0: { cellWidth: "auto" },
+              1: { halign: "right", cellWidth: 20 },
             },
           });
           y = doc.lastAutoTable.finalY + 3;
-        } else {
-          doc.text(
-            `Subtotal (excl. VAT): ${fmt(ticket.totals.subtotal)}`,
-            marginX,
-            y,
-          );
-          y += 4;
-          doc.text(`VAT total: ${fmt(ticket.totals.tax)}`, marginX, y);
-          y += 4;
-          doc.text(
-            `Total (incl. VAT): ${fmt(ticket.totals.total)}`,
-            marginX,
-            y,
-          );
-          y += 6;
         }
-
-        // VAT breakdown
         const vatRows = Object.keys(ticket.vatSummary)
           .sort()
           .map((rate) => {
@@ -727,21 +904,22 @@
           y += 1;
           doc.autoTable({
             startY: y,
-            head: [["Rate", "Net", "VAT", "Gross"]],
+            margin: { left: marginX, right: marginX },
+            tableWidth: pageWidth - marginX * 2,
+            head: [["Rate", "Net €", "VAT €", "Gross €"]],
             body: vatRows,
             theme: "plain",
-            styles: { fontSize: 8, cellPadding: 1 },
+            styles: { fontSize: 8, cellPadding: 1, overflow: "linebreak" },
             headStyles: { fillColor: [245, 245, 245] },
             columnStyles: {
-              1: { halign: "right" },
-              2: { halign: "right" },
-              3: { halign: "right" },
+              0: { cellWidth: "auto" },
+              1: { halign: "right", cellWidth: 18 },
+              2: { halign: "right", cellWidth: 16 },
+              3: { halign: "right", cellWidth: 18 },
             },
           });
           y = doc.lastAutoTable.finalY + 3;
         }
-
-        // Payment + comment + footer
         doc.setFontSize(9);
         doc.text(`Payment: ${ticket.paymentMethod}`, marginX, y);
         y += 4;
@@ -756,28 +934,77 @@
           doc.text(ticket.footerNote, marginX, y);
           doc.setTextColor(0);
         }
+        const dateLabel = new Date(ticket.timestamp).toLocaleDateString();
+        const shareTitle = `${ticket.business.name || "Mistral"} - VAT Ticket - ${dateLabel}`;
+        const fileName =
+          shareTitle.replace(/[^a-zA-Z0-9 \-]/g, "").replace(/\s+/g, "_") +
+          ".pdf";
+        return { doc, fileName, shareTitle };
+      }
 
-        const fileName = (
-          ticket.receiptNo
-            ? `${ticket.receiptNo}.pdf`
-            : `Receipt_${new Date(ticket.timestamp).toISOString()}.pdf`
-        ).replace(/[:]/g, "-");
-        try {
-          doc.save(fileName);
-        } catch (e) {
-          alert(
-            "Unable to download PDF. If you are in an in-app browser, try opening in Chrome/Edge/Safari.",
-          );
+      function shareVatTicketPDF(ticket, opts = { format: "receipt" }) {
+        const result = buildVatTicketDoc(ticket, opts);
+        if (!result) {
+          alert("PDF engine (jsPDF) failed to load.");
+          return;
+        }
+        const blob = result.doc.output("blob");
+        const file = new File([blob], result.fileName, {
+          type: "application/pdf",
+        });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          navigator
+            .share({ files: [file], title: result.shareTitle })
+            .catch(() => {});
+        } else {
+          result.doc.save(result.fileName);
         }
       }
 
+      function parseMenuExcel(arrayBuffer) {
+        const wb = XLSX.read(arrayBuffer, { type: "array" });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet);
+        return rows
+          .map((row, i) => ({
+            id: row.id || `imported_${i}`,
+            name: String(row.name || ""),
+            category: row.category === "Food" ? "Food" : "Drinks",
+            price: parseFloat(row.price) || 0,
+            vat: isNaN(parseFloat(row.vat)) ? 0.21 : parseFloat(row.vat),
+          }))
+          .filter((item) => item.name);
+      }
+
+      function exportMenuExcel(menuItems) {
+        if (!window.XLSX) {
+          alert("XLSX library not loaded.");
+          return;
+        }
+        const rows = menuItems.map((item) => ({
+          id: item.id,
+          name: item.name,
+          category: item.category,
+          price: item.price,
+          vat: item.vat,
+        }));
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(
+          wb,
+          XLSX.utils.json_to_sheet(rows),
+          "Menu",
+        );
+        XLSX.writeFile(wb, "Menu.xlsx");
+      }
+
       function App() {
-        const menu = DEFAULT_MENU;
+        const [menu, setMenu] = useLocalStorage("pos_menu", DEFAULT_MENU);
         const [orders, setOrders] = useLocalStorage("orders", {});
         const [overview, setOverview] = useLocalStorage("overview", []);
         const [selectedTable, setSelectedTable] = useState(TABLES[0]);
         const [tab, setTab] = useState("orders");
         const [category, setCategory] = useState("All");
+        const [searchQuery, setSearchQuery] = useState("");
         const [settings, setSettings] = useLocalStorage(
           "pos_settings",
           DEFAULT_SETTINGS,
@@ -786,17 +1013,48 @@
         const [confirmingClear, setConfirmingClear] = useState(false);
         const [confirmingReset, setConfirmingReset] = useState(false);
         const [diag, setDiag] = useState(getLibDiag());
+        const [darkMode, setDarkMode] = useLocalStorage("pos_dark_mode", false);
+        const [editingMenu, setEditingMenu] = useState(false);
+        const [editDraft, setEditDraft] = useState(null);
+        const fileInputRef = useRef(null);
+        const [qrDataUrl, setQrDataUrl] = useState(null);
 
         useEffect(() => {
           const timeout = setTimeout(() => setDiag(getLibDiag()), 800);
           return () => clearTimeout(timeout);
         }, []);
 
+        useEffect(() => {
+          document.documentElement.classList.toggle("dark", darkMode);
+        }, [darkMode]);
+
+        useEffect(() => {
+          setQrDataUrl(null);
+        }, [selectedTable]);
+
+        useEffect(() => {
+          const doBackup = () => {
+            try {
+              const backup = JSON.stringify({
+                orders,
+                overview,
+                menu,
+                settings,
+                exportedAt: new Date().toISOString(),
+              });
+              localStorage.setItem("pos_auto_backup", backup);
+            } catch {}
+          };
+          const interval = setInterval(doBackup, 300000);
+          return () => clearInterval(interval);
+        }, [orders, overview, menu, settings]);
+
         const emptyTable = {
           items: [],
-          cashPaid: false,
+          cashPaid: true,
           comment: "",
           receiptNo: null,
+          tip: 0,
         };
         const current = orders[selectedTable] || emptyTable;
 
@@ -880,6 +1138,14 @@
           });
         }
 
+        function setTipForCurrent(val) {
+          setOrders((prev) => {
+            const table = cloneTableState(prev);
+            table.tip = val;
+            return { ...prev, [selectedTable]: table };
+          });
+        }
+
         function clearCurrentTable() {
           if (!confirmingClear) {
             setConfirmingClear(true);
@@ -896,29 +1162,36 @@
         function closeOrder() {
           const tableOrder = orders[selectedTable] || emptyTable;
           if (!tableOrder.items.length) return;
-          const gross = tableOrder.items.reduce(
+          const discountFactor = tableOrder.thomasDiscount ? 0.9 : 1;
+          const rawGross = tableOrder.items.reduce(
             (sum, item) => sum + item.price * item.qty,
             0,
           );
-          const net = tableOrder.items.reduce(
-            (sum, item) => sum + (item.price * item.qty) / (1 + item.vat),
-            0,
-          );
+          const gross = rawGross * discountFactor;
+          const net =
+            tableOrder.items.reduce(
+              (sum, item) => sum + (item.price * item.qty) / (1 + item.vat),
+              0,
+            ) * discountFactor;
+          const discountAmount = roundToCents(rawGross - gross);
           const totalsSnapshot = {
-            subtotal: net,
-            tax: gross - net,
-            total: gross,
+            subtotal: roundToCents(net),
+            tax: roundToCents(gross - net),
+            total: roundToCents(gross),
           };
           setOverview((prev) => [
             ...prev,
             {
               table: selectedTable,
-              items: tableOrder.items,
+              items: tableOrder.items.map((item) => ({ ...item })),
               totals: totalsSnapshot,
               timestamp: new Date().toISOString(),
               cashPaid: tableOrder.cashPaid,
               comment: tableOrder.comment || "",
               receiptNo: tableOrder.receiptNo || null,
+              tip: tableOrder.tip || 0,
+              thomasDiscount: tableOrder.thomasDiscount || false,
+              discountAmount,
             },
           ]);
           setOrders((prev) => ({
@@ -939,6 +1212,8 @@
             Table: order.table,
             Timestamp: order.timestamp,
             CashPaid: order.cashPaid,
+            Discount: order.thomasDiscount || false,
+            Tip_EUR: roundToCents(order.tip || 0),
             Comment: order.comment || "",
             ReceiptNo: order.receiptNo || "",
             SubtotalNet_EUR: roundToCents(order.totals.subtotal),
@@ -947,8 +1222,9 @@
           }));
           const lineRows = [];
           overview.forEach((order, idx) => {
+            const df = order.thomasDiscount ? 0.9 : 1;
             (order.items || []).forEach((item) => {
-              const gross = item.price * item.qty;
+              const gross = item.price * item.qty * df;
               const net = gross / (1 + item.vat);
               const vatAmt = gross - net;
               lineRows.push({
@@ -956,10 +1232,11 @@
                 Table: order.table,
                 Timestamp: order.timestamp,
                 CashPaid: order.cashPaid,
+                Discount: order.thomasDiscount || false,
                 ReceiptNo: order.receiptNo || "",
                 ItemName: item.name,
                 Qty: item.qty,
-                UnitPriceGross_EUR: roundToCents(item.price),
+                UnitPriceGross_EUR: roundToCents(item.price * df),
                 VAT_Rate: item.vat,
                 LineNet_EUR: roundToCents(net),
                 LineVAT_EUR: roundToCents(vatAmt),
@@ -991,14 +1268,63 @@
           setOverview([]);
         }
 
-        const grandTotal = overview.reduce(
-          (sum, order) => sum + (order?.totals?.total || 0),
-          0,
-        );
-        const filteredMenu =
-          category === "All"
-            ? menu
-            : menu.filter((item) => item.category === category);
+        function reopenOrder(index) {
+          const order = overview[index];
+          if (!order) return;
+          const existing = orders[order.table];
+          if (existing && existing.items && existing.items.length > 0) {
+            if (
+              !confirm(
+                `Table ${order.table} already has ${existing.items.length} items. Replace current order?`,
+              )
+            )
+              return;
+          }
+          setOrders((prev) => ({
+            ...prev,
+            [order.table]: {
+              items: order.items.map((item) => ({ ...item })),
+              cashPaid: order.cashPaid,
+              thomasDiscount: order.thomasDiscount || false,
+              comment: order.comment || "",
+              receiptNo: order.receiptNo || null,
+              tip: order.tip || 0,
+            },
+          }));
+          setOverview((prev) => prev.filter((_, i) => i !== index));
+          setSelectedTable(order.table);
+          setTab("orders");
+        }
+
+        const grandTotal = overview.reduce((sum, order) => {
+          return sum + (order?.totals?.total || 0);
+        }, 0);
+
+        const pendingTotal = Object.values(orders).reduce((sum, table) => {
+          if (!table || !table.items) return sum;
+          const gross = table.items.reduce(
+            (s, item) => s + item.price * item.qty,
+            0,
+          );
+          return sum + (table.thomasDiscount ? gross * 0.9 : gross);
+        }, 0);
+
+        useEffect(() => {
+          const allTotal = roundToCents(grandTotal + pendingTotal);
+          const rounded = Math.round(allTotal);
+          document.title =
+            rounded > 0 ? `Mistral POS | €${rounded}` : "Mistral POS";
+        }, [grandTotal, pendingTotal]);
+
+        const filteredMenu = menu.filter((item) => {
+          if (category !== "All" && item.category !== category) return false;
+          if (
+            searchQuery &&
+            !item.name.toLowerCase().includes(searchQuery.toLowerCase())
+          )
+            return false;
+          return true;
+        });
 
         function takeNextReceiptNumber() {
           let receiptNo;
@@ -1008,6 +1334,75 @@
             return { ...prev, nextReceiptNumber: num + 1 };
           });
           return receiptNo;
+        }
+
+        function handleMenuImport(e) {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = (evt) => {
+            try {
+              const items = parseMenuExcel(evt.target.result);
+              if (items.length === 0) {
+                alert("No valid menu items found in the file.");
+                return;
+              }
+              if (
+                !confirm(
+                  `Import ${items.length} menu items? This will replace the current menu.`,
+                )
+              )
+                return;
+              setMenu(items);
+              setEditingMenu(false);
+            } catch (err) {
+              alert("Failed to parse Excel file: " + err.message);
+            }
+          };
+          reader.readAsArrayBuffer(file);
+          e.target.value = "";
+        }
+
+        function startEditingMenu() {
+          setEditDraft(menu.map((item) => ({ ...item })));
+          setEditingMenu(true);
+        }
+
+        function saveMenuEdits() {
+          const valid = editDraft.filter((item) => item.name.trim());
+          setMenu(valid);
+          setEditingMenu(false);
+          setEditDraft(null);
+        }
+
+        function cancelMenuEdits() {
+          setEditingMenu(false);
+          setEditDraft(null);
+        }
+
+        function updateDraftItem(index, field, value) {
+          setEditDraft((prev) => {
+            const copy = [...prev];
+            copy[index] = { ...copy[index], [field]: value };
+            return copy;
+          });
+        }
+
+        function addDraftItem() {
+          setEditDraft((prev) => [
+            ...prev,
+            {
+              id: `new_${Date.now()}`,
+              name: "",
+              category: "Food",
+              price: 0,
+              vat: 0.12,
+            },
+          ]);
+        }
+
+        function removeDraftItem(index) {
+          setEditDraft((prev) => prev.filter((_, i) => i !== index));
         }
 
         function downloadVatTicketForCurrent() {
@@ -1028,7 +1423,26 @@
             receiptNo = takeNextReceiptNumber();
             assignedNow = true;
           }
-          const { lines, summary } = computeVatBreakdown(current.items);
+          const df = current.thomasDiscount ? 0.9 : 1;
+          const { lines, summary } = computeVatBreakdown(current.items, df);
+          const derivedTotals = Object.values(summary).reduce(
+            (acc, r) => ({
+              subtotal: acc.subtotal + r.net,
+              tax: acc.tax + r.vat,
+              total: acc.total + r.gross,
+            }),
+            { subtotal: 0, tax: 0, total: 0 },
+          );
+          derivedTotals.subtotal = roundToCents(derivedTotals.subtotal);
+          derivedTotals.tax = roundToCents(derivedTotals.tax);
+          derivedTotals.total = roundToCents(derivedTotals.total);
+          const rawGross = current.items.reduce(
+            (s, i) => s + i.price * i.qty,
+            0,
+          );
+          const discountAmt = current.thomasDiscount
+            ? roundToCents(rawGross - derivedTotals.total)
+            : 0;
           const ticket = {
             business: {
               name: settings.businessName,
@@ -1040,7 +1454,10 @@
             table: selectedTable,
             paymentMethod: current.cashPaid ? "Cash" : "Card/Other",
             comment: current.comment || "",
-            totals,
+            totals: derivedTotals,
+            discount: current.thomasDiscount ? 10 : 0,
+            discountAmount: discountAmt,
+            tip: current.tip || 0,
             lines,
             vatSummary: summary,
             footerNote: settings.footerNote || "",
@@ -1053,6 +1470,131 @@
               return { ...prev, [selectedTable]: table };
             });
           }
+        }
+
+        function buildTicketForCurrent() {
+          if (!current.items.length) return null;
+          let receiptNo = current.receiptNo;
+          let assignedNow = false;
+          if (!receiptNo) {
+            receiptNo = takeNextReceiptNumber();
+            assignedNow = true;
+          }
+          const df = current.thomasDiscount ? 0.9 : 1;
+          const { lines, summary } = computeVatBreakdown(current.items, df);
+          const derivedTotals = Object.values(summary).reduce(
+            (acc, r) => ({
+              subtotal: acc.subtotal + r.net,
+              tax: acc.tax + r.vat,
+              total: acc.total + r.gross,
+            }),
+            { subtotal: 0, tax: 0, total: 0 },
+          );
+          derivedTotals.subtotal = roundToCents(derivedTotals.subtotal);
+          derivedTotals.tax = roundToCents(derivedTotals.tax);
+          derivedTotals.total = roundToCents(derivedTotals.total);
+          const rawGross = current.items.reduce(
+            (s, i) => s + i.price * i.qty,
+            0,
+          );
+          const discountAmt = current.thomasDiscount
+            ? roundToCents(rawGross - derivedTotals.total)
+            : 0;
+          const ticket = {
+            business: {
+              name: settings.businessName,
+              address: settings.businessAddress,
+              vatNumber: settings.vatNumber,
+            },
+            receiptNo,
+            timestamp: new Date().toISOString(),
+            table: selectedTable,
+            paymentMethod: current.cashPaid ? "Cash" : "Card/Other",
+            comment: current.comment || "",
+            totals: derivedTotals,
+            discount: current.thomasDiscount ? 10 : 0,
+            discountAmount: discountAmt,
+            tip: current.tip || 0,
+            lines,
+            vatSummary: summary,
+            footerNote: settings.footerNote || "",
+          };
+          if (assignedNow) {
+            setOrders((prev) => {
+              const table = cloneTableState(prev);
+              table.receiptNo = receiptNo;
+              return { ...prev, [selectedTable]: table };
+            });
+          }
+          return ticket;
+        }
+
+        function shareVatTicketForCurrent() {
+          const ticket = buildTicketForCurrent();
+          if (!ticket) {
+            alert("No items in the order.");
+            return;
+          }
+          shareVatTicketPDF(ticket, { format: "receipt" });
+        }
+
+        function buildTicketFromOverview(index) {
+          const order = overview[index];
+          if (!order || !order.items?.length) return null;
+          let assignedNo = order.receiptNo;
+          if (!assignedNo) {
+            assignedNo = takeNextReceiptNumber();
+            setOverview((prev) => {
+              const copy = [...prev];
+              copy[index] = { ...prev[index], receiptNo: assignedNo };
+              return copy;
+            });
+          }
+          const df = order.thomasDiscount ? 0.9 : 1;
+          const { lines, summary } = computeVatBreakdown(order.items, df);
+          const derivedTotals = Object.values(summary).reduce(
+            (acc, r) => ({
+              subtotal: acc.subtotal + r.net,
+              tax: acc.tax + r.vat,
+              total: acc.total + r.gross,
+            }),
+            { subtotal: 0, tax: 0, total: 0 },
+          );
+          derivedTotals.subtotal = roundToCents(derivedTotals.subtotal);
+          derivedTotals.tax = roundToCents(derivedTotals.tax);
+          derivedTotals.total = roundToCents(derivedTotals.total);
+          const rawGross = order.items.reduce((s, i) => s + i.price * i.qty, 0);
+          const discountAmt = order.thomasDiscount
+            ? roundToCents(rawGross - derivedTotals.total)
+            : 0;
+          return {
+            business: {
+              name: settings.businessName,
+              address: settings.businessAddress,
+              vatNumber: settings.vatNumber,
+            },
+            receiptNo: assignedNo,
+            timestamp: order.timestamp,
+            table: order.table,
+            paymentMethod: order.cashPaid ? "Cash" : "Card/Other",
+            discount: order.thomasDiscount ? 10 : 0,
+            discountAmount: discountAmt,
+            tip: order.tip || 0,
+            comment: order.comment || "",
+            totals: derivedTotals,
+            lines,
+            vatSummary: summary,
+            footerNote: settings.footerNote || "",
+          };
+        }
+
+        function shareVatTicketFromOverview(index) {
+          const ticket = buildTicketFromOverview(index);
+          if (!ticket) {
+            alert("No items on this order.");
+            return;
+          }
+          shareVatTicketPDF(ticket, { format: "receipt" });
         }
 
         function downloadVatTicketFromOverview(index) {
@@ -1077,7 +1619,23 @@
               return copy;
             });
           }
-          const { lines, summary } = computeVatBreakdown(order.items);
+          const df = order.thomasDiscount ? 0.9 : 1;
+          const { lines, summary } = computeVatBreakdown(order.items, df);
+          const derivedTotals = Object.values(summary).reduce(
+            (acc, r) => ({
+              subtotal: acc.subtotal + r.net,
+              tax: acc.tax + r.vat,
+              total: acc.total + r.gross,
+            }),
+            { subtotal: 0, tax: 0, total: 0 },
+          );
+          derivedTotals.subtotal = roundToCents(derivedTotals.subtotal);
+          derivedTotals.tax = roundToCents(derivedTotals.tax);
+          derivedTotals.total = roundToCents(derivedTotals.total);
+          const rawGross = order.items.reduce((s, i) => s + i.price * i.qty, 0);
+          const discountAmt = order.thomasDiscount
+            ? roundToCents(rawGross - derivedTotals.total)
+            : 0;
           const ticket = {
             business: {
               name: settings.businessName,
@@ -1088,13 +1646,32 @@
             timestamp: order.timestamp,
             table: order.table,
             paymentMethod: order.cashPaid ? "Cash" : "Card/Other",
+            discount: order.thomasDiscount ? 10 : 0,
+            discountAmount: discountAmt,
+            tip: order.tip || 0,
             comment: order.comment || "",
-            totals: order.totals,
+            totals: derivedTotals,
             lines,
             vatSummary: summary,
             footerNote: settings.footerNote || "",
           };
           downloadVatTicketPDF(ticket, { format: "receipt" });
+        }
+
+        function handleVatTicket(index) {
+          if (settings.pdfMode === "download") {
+            downloadVatTicketFromOverview(index);
+          } else {
+            shareVatTicketFromOverview(index);
+          }
+        }
+
+        function handleVatTicketForCurrent() {
+          if (settings.pdfMode === "download") {
+            downloadVatTicketForCurrent();
+          } else {
+            shareVatTicketForCurrent();
+          }
         }
 
         return (
@@ -1106,6 +1683,15 @@
                   React {diag.reactOk ? "✓" : "✗"} · XLSX{" "}
                   {diag.xlsxOk ? "✓" : "✗"} · PDF {diag.jsPdfOk ? "✓" : "✗"}
                 </div>
+                <button
+                  onClick={() => setDarkMode((v) => !v)}
+                  className="px-3 py-1 rounded-lg bg-neutral-700 hover:bg-neutral-600 text-sm text-neutral-200"
+                  title={
+                    darkMode ? "Switch to light mode" : "Switch to dark mode"
+                  }
+                >
+                  {darkMode ? "☀️" : "🌙"}
+                </button>
                 <button
                   onClick={() => setShowSettings(true)}
                   className="px-3 py-1 rounded-lg bg-neutral-700 hover:bg-neutral-600 text-sm text-neutral-200"
@@ -1121,23 +1707,37 @@
                   settings={settings}
                   setSettings={setSettings}
                   onClose={() => setShowSettings(false)}
+                  onRestore={(data) => {
+                    if (data.orders) setOrders(data.orders);
+                    if (data.overview) setOverview(data.overview);
+                    if (data.menu) setMenu(data.menu);
+                    if (data.settings) setSettings(data.settings);
+                    alert("Backup restored.");
+                  }}
                 />
               )}
               {tab === "orders" && (
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {/* MENU */}
                   <div className="md:col-span-2">
-                    <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
                       <h2 className="font-semibold">Menu</h2>
-                      <div className="flex gap-2">
+                      <div className="flex gap-2 flex-wrap items-center">
+                        <input
+                          type="text"
+                          placeholder="Search menu..."
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          className="px-3 py-1.5 rounded-full border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-sm w-40 focus:outline-none focus:ring-2 focus:ring-neutral-400"
+                        />
                         {["All", "Food", "Drinks"].map((cat) => (
                           <button
                             key={cat}
                             onClick={() => setCategory(cat)}
                             className={
                               category === cat
-                                ? "px-4 py-1.5 rounded-full bg-neutral-800 text-white text-sm font-medium shadow-sm"
-                                : "px-4 py-1.5 rounded-full bg-neutral-200 text-neutral-600 text-sm hover:bg-neutral-300"
+                                ? "px-4 py-1.5 rounded-full bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-800 text-white text-sm font-medium shadow-sm"
+                                : "px-4 py-1.5 rounded-full bg-neutral-200 dark:bg-neutral-700 text-neutral-600 dark:text-neutral-300 text-sm hover:bg-neutral-300 dark:hover:bg-neutral-600"
                             }
                           >
                             {cat}
@@ -1150,14 +1750,29 @@
                         const idx = menu.findIndex(
                           (item) => item.id === menuItem.id,
                         );
+                        const inOrder = current.items.find(
+                          (item) => item.key === menuItem.id,
+                        );
+                        const qty = inOrder ? inOrder.qty : 0;
+                        const leftColor =
+                          menuItem.category === "Food" ? "#10b981" : "#0ea5e9";
                         return (
                           <button
                             key={menuItem.id}
                             onClick={() => addItemByIndex(idx)}
-                            className="border border-neutral-200 rounded-xl p-3 text-left bg-white shadow-sm hover:shadow-md hover:border-neutral-300 transition-shadow"
+                            className="relative border border-neutral-200 dark:border-neutral-700 rounded-xl p-3 text-left bg-white dark:bg-neutral-800 shadow-sm hover:shadow-md hover:border-neutral-300 dark:hover:border-neutral-600 transition-shadow"
+                            style={{
+                              borderLeftWidth: "4px",
+                              borderLeftColor: leftColor,
+                            }}
                           >
+                            {qty > 0 && (
+                              <span className="absolute -top-2 -right-2 bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-800 text-white text-xs font-bold rounded-full w-6 h-6 flex items-center justify-center shadow">
+                                {qty}
+                              </span>
+                            )}
                             <div className="font-medium">{menuItem.name}</div>
-                            <div className="text-sm text-neutral-500">
+                            <div className="text-sm text-neutral-500 dark:text-neutral-400">
                               {eur(menuItem.price)} (incl. VAT{" "}
                               {(menuItem.vat * 100).toFixed(0)}%)
                             </div>
@@ -1167,91 +1782,252 @@
                     </div>
                   </div>
                   {/* ORDER */}
-                  <div className="bg-white rounded-xl shadow-sm border border-neutral-200 p-4 md:sticky md:top-4 self-start">
+                  <div className="bg-white dark:bg-neutral-800 rounded-xl shadow-sm border border-neutral-200 dark:border-neutral-700 p-4 md:sticky md:top-4 self-start md:max-h-[calc(100vh-2rem)] flex flex-col">
                     <div className="flex items-center justify-between mb-2">
-                      <h2 className="font-semibold">
-                        Table {selectedTable} Order
-                      </h2>
+                      <h2 className="font-semibold">Order</h2>
                       <select
                         value={selectedTable}
                         onChange={(e) => setSelectedTable(e.target.value)}
-                        className="border rounded px-2 py-1"
+                        className="border dark:border-neutral-600 rounded px-2 py-1 dark:bg-neutral-700"
                       >
-                        {TABLES.map((tableNum) => (
-                          <option key={tableNum} value={tableNum}>
-                            Table {tableNum}
-                          </option>
-                        ))}
+                        {TABLES.map((tableNum) => {
+                          const tableItems = (orders[tableNum] || { items: [] })
+                            .items;
+                          const tableTotal = tableItems.reduce(
+                            (s, i) => s + i.price * i.qty,
+                            0,
+                          );
+                          return (
+                            <option key={tableNum} value={tableNum}>
+                              Table {tableNum}
+                              {tableTotal > 0
+                                ? ` - €${Math.round(tableTotal)}`
+                                : ""}
+                            </option>
+                          );
+                        })}
                       </select>
                     </div>
                     {current.items.length === 0 ? (
-                      <div className="text-neutral-500">No items</div>
+                      <div className="flex flex-col items-center justify-center py-8 text-neutral-400 dark:text-neutral-500">
+                        <svg
+                          className="w-12 h-12 mb-2"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                          strokeWidth="1.5"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z"
+                          />
+                        </svg>
+                        <div className="text-sm font-medium">No items yet</div>
+                        <div className="text-xs">Tap a menu item to add it</div>
+                      </div>
                     ) : (
-                      <ul className="space-y-2">
+                      <ul className="space-y-2 flex-1 overflow-y-auto min-h-0">
                         {current.items.map((item) => (
-                          <li
+                          <SwipeableItem
                             key={item.key}
-                            className="flex items-center justify-between gap-2 border-b pb-1"
+                            onSwipe={() => removeItem(item.key)}
                           >
-                            <div className="flex-1">
-                              <div className="font-medium">{item.name}</div>
-                              <div className="text-sm text-neutral-500">
-                                {item.qty} × {eur(item.price)}
+                            <li className="flex items-center justify-between gap-2 border-b dark:border-neutral-700 pb-1 animate-slide-in">
+                              <div className="flex-1">
+                                <div className="font-medium">{item.name}</div>
+                                <div className="text-sm text-neutral-500 dark:text-neutral-400">
+                                  {item.qty} × {eur(item.price)}
+                                </div>
                               </div>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <button
-                                onClick={() => changeQty(item.key, -1)}
-                                className="w-8 h-8 flex items-center justify-center rounded-lg bg-neutral-100 hover:bg-neutral-200 text-neutral-600 font-medium"
-                              >
-                                −
-                              </button>
-                              <button
-                                onClick={() => changeQty(item.key, +1)}
-                                className="w-8 h-8 flex items-center justify-center rounded-lg bg-neutral-100 hover:bg-neutral-200 text-neutral-600 font-medium"
-                              >
-                                +
-                              </button>
-                              <button
-                                onClick={() => removeItem(item.key)}
-                                className="w-8 h-8 flex items-center justify-center rounded-lg bg-red-50 hover:bg-red-100 text-red-500"
-                              >
-                                ✕
-                              </button>
-                            </div>
-                            <div className="w-24 text-right font-medium">
-                              {eur(item.price * item.qty)}
-                            </div>
-                          </li>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => changeQty(item.key, -1)}
+                                  className="w-8 h-8 flex items-center justify-center rounded-lg bg-neutral-100 dark:bg-neutral-700 hover:bg-neutral-200 dark:hover:bg-neutral-600 text-neutral-600 dark:text-neutral-300 font-medium"
+                                >
+                                  −
+                                </button>
+                                <button
+                                  onClick={() => changeQty(item.key, +1)}
+                                  className="w-8 h-8 flex items-center justify-center rounded-lg bg-neutral-100 dark:bg-neutral-700 hover:bg-neutral-200 dark:hover:bg-neutral-600 text-neutral-600 dark:text-neutral-300 font-medium"
+                                >
+                                  +
+                                </button>
+                                <button
+                                  onClick={() => removeItem(item.key)}
+                                  className="w-8 h-8 flex items-center justify-center rounded-lg bg-red-50 dark:bg-red-900/30 hover:bg-red-100 dark:hover:bg-red-900/50 text-red-500"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                              <div className="w-24 text-right font-medium">
+                                {eur(item.price * item.qty)}
+                              </div>
+                            </li>
+                          </SwipeableItem>
                         ))}
                       </ul>
                     )}
-                    <div className="mt-3 bg-neutral-50 rounded-lg p-3 text-sm space-y-1">
-                      <div className="flex justify-between">
-                        <span>Subtotal (excl. VAT)</span>
-                        <span>{eur(roundToCents(totals.subtotal))}</span>
+                    {(() => {
+                      const df = current.thomasDiscount ? 0.9 : 1;
+                      const netAfter = roundToCents(totals.subtotal * df);
+                      const taxAfter = roundToCents(totals.tax * df);
+                      const totalAfter = roundToCents(totals.total * df);
+                      return (
+                        <div className="mt-3 bg-neutral-50 dark:bg-neutral-900 rounded-lg p-3 space-y-1">
+                          {current.thomasDiscount && (
+                            <div className="flex justify-between text-sm text-red-500">
+                              <span>Thomas discount (10%)</span>
+                              <span>
+                                -{eur(roundToCents(totals.total * 0.1))}
+                              </span>
+                            </div>
+                          )}
+                          <div className="flex justify-between text-sm">
+                            <span>Subtotal (excl. VAT)</span>
+                            <span>{eur(netAfter)}</span>
+                          </div>
+                          <div className="flex justify-between text-sm">
+                            <span>VAT</span>
+                            <span>{eur(taxAfter)}</span>
+                          </div>
+                          <div className="flex justify-between font-bold text-lg pt-2 border-t border-neutral-200 dark:border-neutral-700">
+                            <span>Total (incl. VAT)</span>
+                            <span>{eur(totalAfter)}</span>
+                          </div>
+                          {(current.tip || 0) > 0 && (
+                            <div className="flex justify-between text-sm text-emerald-600 dark:text-emerald-400">
+                              <span>Tip</span>
+                              <span>{eur(current.tip)}</span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                    <div className="mt-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={!!current.thomasDiscount}
+                            onChange={(e) =>
+                              setOrders((prev) => {
+                                const table = cloneTableState(prev);
+                                table.thomasDiscount = e.target.checked;
+                                return { ...prev, [selectedTable]: table };
+                              })
+                            }
+                            className="w-4 h-4"
+                          />
+                          <span className="text-sm">Thomas</span>
+                        </label>
+                        <div className="flex items-center gap-1">
+                          <span className="text-sm mr-1">Tip</span>
+                          {[5, 10, 15].map((pct) => {
+                            const base = roundToCents(
+                              current.thomasDiscount
+                                ? totals.total * 0.9
+                                : totals.total,
+                            );
+                            const tipVal = roundToCents((base * pct) / 100);
+                            const isActive =
+                              current.tip === tipVal && tipVal > 0;
+                            return (
+                              <button
+                                key={pct}
+                                onClick={() =>
+                                  setTipForCurrent(isActive ? 0 : tipVal)
+                                }
+                                className={`px-2 py-1 rounded text-xs font-medium border ${isActive ? "bg-emerald-600 text-white border-emerald-600" : "border-neutral-300 dark:border-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700"}`}
+                              >
+                                {pct}%
+                              </button>
+                            );
+                          })}
+                          <input
+                            type="number"
+                            value={current.tip || ""}
+                            onChange={(e) =>
+                              setTipForCurrent(parseFloat(e.target.value) || 0)
+                            }
+                            className="w-14 border dark:border-neutral-600 rounded px-2 py-1 text-xs dark:bg-neutral-700"
+                            placeholder="€"
+                            step="0.5"
+                            min="0"
+                          />
+                        </div>
                       </div>
-                      <div className="flex justify-between">
-                        <span>VAT</span>
-                        <span>{eur(roundToCents(totals.tax))}</span>
-                      </div>
-                      <div className="flex justify-between font-semibold">
-                        <span>Total (incl. VAT)</span>
-                        <span>{eur(roundToCents(totals.total))}</span>
-                      </div>
-                    </div>
-                    <div className="mt-3 flex items-center gap-2">
-                      <label className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={!!current.cashPaid}
-                          onChange={(e) =>
-                            setCashPaidForCurrent(e.target.checked)
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          onClick={() => {
+                            setCashPaidForCurrent(true);
+                            setQrDataUrl(null);
+                          }}
+                          className={
+                            current.cashPaid
+                              ? "py-2 rounded-lg bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-800 text-white font-medium text-sm"
+                              : "py-2 rounded-lg border border-neutral-300 dark:border-neutral-600 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-700"
                           }
-                          className="w-4 h-4"
-                        />
-                        Paid in cash
-                      </label>
+                        >
+                          Cash
+                        </button>
+                        <button
+                          onClick={() => {
+                            setCashPaidForCurrent(false);
+                            if (
+                              settings.payconiqLink &&
+                              window.QRCode &&
+                              current.items.length > 0
+                            ) {
+                              const finalTotal = current.thomasDiscount
+                                ? totals.total * 0.9
+                                : totals.total;
+                              const amountCents = Math.round(
+                                roundToCents(finalTotal) * 100,
+                              );
+                              const url =
+                                settings.payconiqLink +
+                                (settings.payconiqLink.includes("?")
+                                  ? "&"
+                                  : "?") +
+                                "A=" +
+                                amountCents;
+                              QRCode.toDataURL(
+                                url,
+                                { width: 280, margin: 2 },
+                                (err, dataUrl) => {
+                                  if (!err) setQrDataUrl(dataUrl);
+                                },
+                              );
+                            }
+                          }}
+                          className={
+                            !current.cashPaid
+                              ? "py-2 rounded-lg bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-800 text-white font-medium text-sm"
+                              : "py-2 rounded-lg border border-neutral-300 dark:border-neutral-600 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                          }
+                        >
+                          Payconiq
+                        </button>
+                      </div>
+                      {!current.cashPaid && qrDataUrl && (
+                        <div className="flex flex-col items-center gap-1 p-3 bg-white rounded-xl border border-neutral-200">
+                          <img
+                            src={qrDataUrl}
+                            alt="Payconiq QR"
+                            className="w-48 h-48"
+                          />
+                          <div className="text-sm font-medium text-neutral-800">
+                            {eur(
+                              roundToCents(
+                                current.thomasDiscount
+                                  ? totals.total * 0.9
+                                  : totals.total,
+                              ),
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
                     <div className="mt-3">
                       <label
@@ -1270,16 +2046,16 @@
                             return { ...prev, [selectedTable]: table };
                           })
                         }
-                        className="w-full border rounded p-2 text-sm"
+                        className="w-full border dark:border-neutral-600 rounded p-2 text-sm dark:bg-neutral-700"
                         placeholder="Add comment..."
                       />
                     </div>
                     <div className="mt-3 space-y-2">
                       <button
-                        onClick={downloadVatTicketForCurrent}
-                        className="w-full px-4 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-white font-medium shadow-sm"
+                        onClick={handleVatTicketForCurrent}
+                        className="w-full px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-sm text-sm"
                       >
-                        Download VAT Ticket (PDF)
+                        VAT Ticket (PDF)
                       </button>
                       <div className="grid grid-cols-2 gap-2">
                         <button
@@ -1312,7 +2088,7 @@
               {tab === "overview" && (
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <h2 className="font-semibold">Closed Orders Overview</h2>
+                    <h2 className="font-semibold">Closed Orders</h2>
                     <div className="flex gap-2">
                       <button
                         onClick={exportExcel}
@@ -1325,62 +2101,649 @@
                         className={
                           confirmingReset
                             ? "min-w-[5.5rem] px-3 py-1.5 rounded-lg bg-red-600 text-white text-sm font-medium shadow-sm"
-                            : "min-w-[5.5rem] px-3 py-1.5 rounded-lg border-2 border-red-400 text-red-600 hover:bg-red-50 text-sm font-medium"
+                            : "min-w-[5.5rem] px-3 py-1.5 rounded-lg border-2 border-red-400 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 text-sm font-medium"
                         }
                       >
                         {confirmingReset ? "Confirm?" : "Reset"}
                       </button>
                     </div>
                   </div>
-                  {overview.length === 0 ? (
-                    <div className="text-neutral-500">
-                      No closed orders yet.
+                  {overview.length === 0 &&
+                  Object.values(orders).every(
+                    (t) => !t || !t.items || t.items.length === 0,
+                  ) ? (
+                    <div className="flex flex-col items-center justify-center py-8 text-neutral-400 dark:text-neutral-500">
+                      <svg
+                        className="w-12 h-12 mb-2"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                        strokeWidth="1.5"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"
+                        />
+                      </svg>
+                      <div className="text-sm font-medium">No orders yet</div>
+                      <div className="text-xs">
+                        Close an order to see it here
+                      </div>
                     </div>
                   ) : (
-                    <ul className="space-y-2">
-                      {overview.map((order, idx) => (
-                        <li
-                          key={idx}
-                          className="border border-neutral-200 rounded-xl p-3 bg-white shadow-sm"
-                        >
-                          <div className="font-medium flex items-center gap-2 flex-wrap">
-                            <span>
-                              Table {order.table},{" "}
-                              {new Date(order.timestamp).toLocaleString()}
-                            </span>
-                            {order.cashPaid && (
-                              <span className="text-green-600 font-bold">
-                                [CASH]
-                              </span>
-                            )}
-                            {order.receiptNo && (
-                              <span className="text-xs text-neutral-500">
-                                #{order.receiptNo}
-                              </span>
-                            )}
-                            <button
-                              onClick={() => downloadVatTicketFromOverview(idx)}
-                              className="text-sm px-2.5 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-white font-medium"
-                            >
-                              Download VAT Ticket (PDF)
-                            </button>
-                          </div>
-                          <div className="text-sm text-neutral-600">
-                            Total: {eur(roundToCents(order.totals.total))} (VAT:{" "}
-                            {eur(roundToCents(order.totals.tax))})
-                          </div>
-                          {order.comment && (
-                            <div className="text-sm text-neutral-500 mt-1">
-                              Comment: {order.comment}
-                            </div>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
+                    <table
+                      className="w-full text-sm"
+                      style={{
+                        borderSpacing: "0 3px",
+                        borderCollapse: "separate",
+                      }}
+                    >
+                      {overview.length > 0 && (
+                        <tbody>
+                          {overview.map((order, idx) => {
+                            const itemCount = (order.items || []).reduce(
+                              (s, i) => s + i.qty,
+                              0,
+                            );
+                            return (
+                              <tr key={idx} className="shadow-sm">
+                                <td className="py-2 pl-3 font-medium rounded-l-lg border-y border-l border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800">
+                                  T{order.table}
+                                </td>
+                                <td className="py-2 text-neutral-500 dark:text-neutral-400 text-xs border-y border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800">
+                                  {itemCount} items
+                                </td>
+                                <td
+                                  className="py-2 font-semibold text-right border-y border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800"
+                                  style={{ paddingRight: 2 }}
+                                >
+                                  {eur(roundToCents(order.totals.total))}
+                                </td>
+                                <td
+                                  className="py-2 text-xs border-y border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800"
+                                  style={{
+                                    whiteSpace: "nowrap",
+                                    paddingLeft: 4,
+                                  }}
+                                >
+                                  {order.thomasDiscount && (
+                                    <span className="text-neutral-500">
+                                      incl. -10%
+                                    </span>
+                                  )}
+                                  {(order.tip || 0) > 0 && (
+                                    <span className="text-emerald-600 dark:text-emerald-400 ml-1">
+                                      + {eur(order.tip)} tip
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-2 border-y border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800">
+                                  <span
+                                    className={
+                                      order.cashPaid
+                                        ? "text-green-600 dark:text-green-400 text-xs font-bold"
+                                        : "text-blue-600 dark:text-blue-400 text-xs font-bold"
+                                    }
+                                  >
+                                    {order.cashPaid ? "Cash" : "Payconiq"}
+                                  </span>
+                                </td>
+                                <td className="py-2 pr-3 text-right rounded-r-lg border-y border-r border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800">
+                                  <span className="inline-flex items-center gap-2">
+                                    <span className="text-neutral-400 dark:text-neutral-500 text-xs">
+                                      {new Date(
+                                        order.timestamp,
+                                      ).toLocaleTimeString()}
+                                    </span>
+                                    <button
+                                      onClick={() => handleVatTicket(idx)}
+                                      className="text-xs px-2 py-0.5 rounded border border-neutral-300 dark:border-neutral-600 hover:bg-neutral-100 dark:hover:bg-neutral-700 font-medium"
+                                    >
+                                      VAT Ticket
+                                    </button>
+                                    <button
+                                      onClick={() => reopenOrder(idx)}
+                                      className="text-xs px-2 py-0.5 rounded border border-neutral-300 dark:border-neutral-600 hover:bg-neutral-100 dark:hover:bg-neutral-700 font-medium"
+                                    >
+                                      Reopen
+                                    </button>
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      )}
+                      {(() => {
+                        const openTables = Object.entries(orders).filter(
+                          ([, t]) => t && t.items && t.items.length > 0,
+                        );
+                        if (openTables.length === 0) return null;
+                        return (
+                          <tbody>
+                            <tr>
+                              <td
+                                colSpan="6"
+                                className="pt-4 pb-1 pl-1 font-semibold text-base text-amber-600 dark:text-amber-400"
+                              >
+                                Pending Orders
+                              </td>
+                            </tr>
+                            {openTables.map(([tableNum, table]) => {
+                              const gross = table.items.reduce(
+                                (s, item) => s + item.price * item.qty,
+                                0,
+                              );
+                              const itemCount = table.items.reduce(
+                                (s, i) => s + i.qty,
+                                0,
+                              );
+                              return (
+                                <tr key={tableNum} className="shadow-sm">
+                                  <td className="py-2 pl-3 font-medium rounded-l-lg border-y border-l border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20">
+                                    T{tableNum}
+                                  </td>
+                                  <td className="py-2 text-neutral-500 dark:text-neutral-400 text-xs border-y border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20">
+                                    {itemCount} items
+                                  </td>
+                                  <td
+                                    className="py-2 font-semibold text-right border-y border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20"
+                                    style={{ paddingRight: 2 }}
+                                  >
+                                    {eur(roundToCents(gross))}
+                                  </td>
+                                  <td
+                                    className="py-2 border-y border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20"
+                                    style={{ paddingLeft: 4 }}
+                                  ></td>
+                                  <td className="py-2 border-y border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20"></td>
+                                  <td className="py-2 pr-3 rounded-r-lg border-y border-r border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20"></td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        );
+                      })()}
+                      <tfoot>
+                        <tr>
+                          <td colSpan="6" style={{ height: 8 }}></td>
+                        </tr>
+                        <tr className="bg-neutral-800 dark:bg-neutral-700 text-white font-semibold text-lg">
+                          <td className="py-3 pl-3 rounded-l-xl" colSpan="2">
+                            Grand Total
+                          </td>
+                          <td
+                            className="py-3 text-right"
+                            style={{ paddingRight: 2 }}
+                          >
+                            {eur(roundToCents(grandTotal + pendingTotal))}
+                          </td>
+                          <td className="py-3 rounded-r-xl" colSpan="3"></td>
+                        </tr>
+                      </tfoot>
+                    </table>
                   )}
-                  <div className="mt-4 bg-neutral-800 text-white rounded-xl px-4 py-3 font-semibold text-lg flex justify-between">
-                    <span>Grand Total</span>
-                    <span>{eur(roundToCents(grandTotal))}</span>
+                </div>
+              )}
+              {tab === "analytics" &&
+                (() => {
+                  const itemStats = {};
+                  const allOrderSources = [
+                    ...overview,
+                    ...Object.values(orders).filter(
+                      (t) => t && t.items && t.items.length > 0,
+                    ),
+                  ];
+                  allOrderSources.forEach((order) => {
+                    const df = order.thomasDiscount ? 0.9 : 1;
+                    (order.items || []).forEach((item) => {
+                      const key = item.name;
+                      if (!itemStats[key])
+                        itemStats[key] = { name: key, qty: 0, revenue: 0 };
+                      itemStats[key].qty += item.qty;
+                      itemStats[key].revenue += roundToCents(
+                        item.price * item.qty * df,
+                      );
+                    });
+                  });
+                  const byQty = Object.values(itemStats).sort(
+                    (a, b) => b.qty - a.qty,
+                  );
+                  const byRevenue = Object.values(itemStats).sort(
+                    (a, b) => b.revenue - a.revenue,
+                  );
+                  const openTables = Object.entries(orders).filter(
+                    ([, t]) => t && t.items && t.items.length > 0,
+                  );
+                  const pendingRevenue = openTables.reduce((s, [, t]) => {
+                    const gross = t.items.reduce(
+                      (a, item) => a + item.price * item.qty,
+                      0,
+                    );
+                    return (
+                      s + roundToCents(t.thomasDiscount ? gross * 0.9 : gross)
+                    );
+                  }, 0);
+                  const closedRevenue = overview.reduce(
+                    (s, o) => s + (o?.totals?.total || 0),
+                    0,
+                  );
+                  const totalRevenue = closedRevenue + pendingRevenue;
+                  const closedDiscount = overview.reduce(
+                    (s, o) => s + (o.discountAmount || 0),
+                    0,
+                  );
+                  const pendingDiscount = openTables.reduce((s, [, t]) => {
+                    if (!t.thomasDiscount) return s;
+                    const gross = t.items.reduce(
+                      (a, item) => a + item.price * item.qty,
+                      0,
+                    );
+                    return s + roundToCents(gross * 0.1);
+                  }, 0);
+                  const totalDiscount = closedDiscount + pendingDiscount;
+                  const totalTips = overview.reduce(
+                    (s, o) => s + (o?.tip || 0),
+                    0,
+                  );
+                  const allOrders = [
+                    ...overview.map((o) => ({
+                      total: o?.totals?.total || 0,
+                      cashPaid: o.cashPaid,
+                    })),
+                    ...openTables.map(([, t]) => {
+                      const gross = t.items.reduce(
+                        (a, item) => a + item.price * item.qty,
+                        0,
+                      );
+                      return {
+                        total: roundToCents(
+                          t.thomasDiscount ? gross * 0.9 : gross,
+                        ),
+                        cashPaid: t.cashPaid,
+                      };
+                    }),
+                  ];
+                  const cashOrders = allOrders.filter((o) => o.cashPaid);
+                  const cardOrders = allOrders.filter((o) => !o.cashPaid);
+                  const cashTotal = cashOrders.reduce((s, o) => s + o.total, 0);
+                  const cardTotal = cardOrders.reduce((s, o) => s + o.total, 0);
+                  const tableStats = {};
+                  overview.forEach((o) => {
+                    if (!tableStats[o.table])
+                      tableStats[o.table] = { orders: 0, revenue: 0 };
+                    tableStats[o.table].orders += 1;
+                    tableStats[o.table].revenue += o?.totals?.total || 0;
+                  });
+                  openTables.forEach(([tableNum, t]) => {
+                    if (!tableStats[tableNum])
+                      tableStats[tableNum] = { orders: 0, revenue: 0 };
+                    tableStats[tableNum].orders += 1;
+                    const gross = t.items.reduce(
+                      (a, item) => a + item.price * item.qty,
+                      0,
+                    );
+                    tableStats[tableNum].revenue += roundToCents(
+                      t.thomasDiscount ? gross * 0.9 : gross,
+                    );
+                  });
+                  const tableRanking = Object.entries(tableStats)
+                    .map(([t, s]) => ({ table: t, ...s }))
+                    .sort((a, b) => b.revenue - a.revenue);
+
+                  function exportAnalytics() {
+                    if (!window.XLSX) {
+                      alert("XLSX library not loaded.");
+                      return;
+                    }
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(
+                      wb,
+                      XLSX.utils.json_to_sheet(
+                        byQty.map((i) => ({
+                          Item: i.name,
+                          Quantity: i.qty,
+                          Revenue_EUR: roundToCents(i.revenue),
+                        })),
+                      ),
+                      "Items",
+                    );
+                    XLSX.utils.book_append_sheet(
+                      wb,
+                      XLSX.utils.json_to_sheet(
+                        tableRanking.map((t) => ({
+                          Table: t.table,
+                          Orders: t.orders,
+                          Revenue_EUR: roundToCents(t.revenue),
+                        })),
+                      ),
+                      "Tables",
+                    );
+                    XLSX.utils.book_append_sheet(
+                      wb,
+                      XLSX.utils.json_to_sheet([
+                        {
+                          Total_Revenue_EUR: roundToCents(totalRevenue),
+                          Closed_Revenue_EUR: roundToCents(closedRevenue),
+                          Pending_Revenue_EUR: roundToCents(pendingRevenue),
+                          Total_Discount_EUR: roundToCents(totalDiscount),
+                          Total_Tips_EUR: roundToCents(totalTips),
+                          Cash_EUR: roundToCents(cashTotal),
+                          Card_EUR: roundToCents(cardTotal),
+                          Cash_Orders: cashOrders.length,
+                          Card_Orders: cardOrders.length,
+                          Closed_Orders: overview.length,
+                          Pending_Orders: openTables.length,
+                          Total_Orders: overview.length + openTables.length,
+                        },
+                      ]),
+                      "Summary",
+                    );
+                    XLSX.writeFile(wb, "POS_Analytics.xlsx");
+                  }
+
+                  return (
+                    <div>
+                      <div className="flex items-center justify-between mb-4">
+                        <h2 className="font-semibold">Analytics</h2>
+                        <button
+                          onClick={exportAnalytics}
+                          className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium"
+                        >
+                          Export Analytics
+                        </button>
+                      </div>
+                      {overview.length === 0 && openTables.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-8 text-neutral-400 dark:text-neutral-500">
+                          <div className="text-sm font-medium">No data yet</div>
+                          <div className="text-xs">
+                            Add or close orders to see analytics
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="bg-white dark:bg-neutral-800 rounded-xl border border-neutral-200 dark:border-neutral-700 p-4">
+                            <h3 className="font-semibold mb-3">Summary</h3>
+                            <div className="space-y-2 text-sm">
+                              <div className="flex justify-between">
+                                <span>Total orders</span>
+                                <span className="font-medium">
+                                  {overview.length + openTables.length}{" "}
+                                  <span className="text-xs text-neutral-500">
+                                    ({overview.length} closed,{" "}
+                                    {openTables.length} pending)
+                                  </span>
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span>Total revenue</span>
+                                <span className="font-medium">
+                                  {eur(roundToCents(totalRevenue))}
+                                </span>
+                              </div>
+                              {totalDiscount > 0 && (
+                                <div className="flex justify-between">
+                                  <span>Discounts</span>
+                                  <span className="font-medium text-red-500">
+                                    -{eur(roundToCents(totalDiscount))}
+                                  </span>
+                                </div>
+                              )}
+                              <div className="flex justify-between">
+                                <span>Total tips</span>
+                                <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                                  {eur(roundToCents(totalTips))}
+                                </span>
+                              </div>
+                              <div className="flex justify-between border-t border-neutral-200 dark:border-neutral-700 pt-2">
+                                <span>Cash ({cashOrders.length} orders)</span>
+                                <span className="font-medium">
+                                  {eur(roundToCents(cashTotal))}
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span>
+                                  Payconiq ({cardOrders.length} orders)
+                                </span>
+                                <span className="font-medium">
+                                  {eur(roundToCents(cardTotal))}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="bg-white dark:bg-neutral-800 rounded-xl border border-neutral-200 dark:border-neutral-700 p-4">
+                            <h3 className="font-semibold mb-3">
+                              Revenue by Table
+                            </h3>
+                            <div className="space-y-1 text-sm">
+                              {tableRanking.map((t) => (
+                                <div
+                                  key={t.table}
+                                  className="flex justify-between"
+                                >
+                                  <span>
+                                    Table {t.table} ({t.orders} orders)
+                                  </span>
+                                  <span className="font-medium">
+                                    {eur(roundToCents(t.revenue))}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="bg-white dark:bg-neutral-800 rounded-xl border border-neutral-200 dark:border-neutral-700 p-4">
+                            <h3 className="font-semibold mb-3">Most Ordered</h3>
+                            <div className="space-y-1 text-sm">
+                              {byQty.slice(0, 15).map((item, i) => (
+                                <div
+                                  key={item.name}
+                                  className="flex justify-between"
+                                >
+                                  <span>
+                                    {i + 1}. {item.name}
+                                  </span>
+                                  <span className="font-medium">
+                                    {item.qty}x
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="bg-white dark:bg-neutral-800 rounded-xl border border-neutral-200 dark:border-neutral-700 p-4">
+                            <h3 className="font-semibold mb-3">
+                              Highest Revenue
+                            </h3>
+                            <div className="space-y-1 text-sm">
+                              {byRevenue.slice(0, 15).map((item, i) => (
+                                <div
+                                  key={item.name}
+                                  className="flex justify-between"
+                                >
+                                  <span>
+                                    {i + 1}. {item.name}
+                                  </span>
+                                  <span className="font-medium">
+                                    {eur(roundToCents(item.revenue))}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              {tab === "menu" && (
+                <div>
+                  <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+                    <h2 className="font-semibold">Menu Management</h2>
+                    <div className="flex gap-2 flex-wrap">
+                      <button
+                        onClick={
+                          editingMenu ? cancelMenuEdits : startEditingMenu
+                        }
+                        className="px-3 py-1.5 rounded-lg text-sm border border-neutral-300 dark:border-neutral-600 hover:bg-neutral-200 dark:hover:bg-neutral-700"
+                      >
+                        {editingMenu ? "Cancel Edit" : "Edit Menu"}
+                      </button>
+                      {editingMenu && (
+                        <button
+                          onClick={saveMenuEdits}
+                          className="px-3 py-1.5 rounded-lg text-sm bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
+                        >
+                          Save Changes
+                        </button>
+                      )}
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        className="px-3 py-1.5 rounded-lg text-sm border border-neutral-300 dark:border-neutral-600 hover:bg-neutral-200 dark:hover:bg-neutral-700"
+                      >
+                        Import Excel
+                      </button>
+                      <button
+                        onClick={() => exportMenuExcel(menu)}
+                        className="px-3 py-1.5 rounded-lg text-sm border border-neutral-300 dark:border-neutral-600 hover:bg-neutral-200 dark:hover:bg-neutral-700"
+                      >
+                        Export Excel
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (
+                            confirm(
+                              "Reset menu to defaults? All custom items will be lost.",
+                            )
+                          )
+                            setMenu(DEFAULT_MENU);
+                        }}
+                        className="px-3 py-1.5 rounded-lg text-sm border border-red-300 text-red-600 dark:border-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
+                      >
+                        Reset to Default
+                      </button>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={handleMenuImport}
+                        className="hidden"
+                      />
+                    </div>
+                  </div>
+                  {editingMenu ? (
+                    <div className="space-y-2">
+                      <div className="flex gap-2 items-center px-2 text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wide">
+                        <span className="flex-1">Name</span>
+                        <span className="w-[5.5rem]">Category</span>
+                        <span className="w-20">Price</span>
+                        <span className="w-16">VAT</span>
+                        <span className="w-8"></span>
+                      </div>
+                      {(editDraft || []).map((item, i) => (
+                        <div
+                          key={i}
+                          className="flex gap-2 items-center bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-xl p-2"
+                        >
+                          <input
+                            value={item.name}
+                            onChange={(e) =>
+                              updateDraftItem(i, "name", e.target.value)
+                            }
+                            placeholder="Name"
+                            className="flex-1 px-2 py-1 border rounded text-sm dark:bg-neutral-700 dark:border-neutral-600"
+                          />
+                          <select
+                            value={item.category}
+                            onChange={(e) =>
+                              updateDraftItem(i, "category", e.target.value)
+                            }
+                            className="px-2 py-1 border rounded text-sm dark:bg-neutral-700 dark:border-neutral-600"
+                          >
+                            <option value="Food">Food</option>
+                            <option value="Drinks">Drinks</option>
+                          </select>
+                          <input
+                            type="number"
+                            value={item.price}
+                            onChange={(e) =>
+                              updateDraftItem(
+                                i,
+                                "price",
+                                parseFloat(e.target.value) || 0,
+                              )
+                            }
+                            placeholder="Price"
+                            className="w-20 px-2 py-1 border rounded text-sm dark:bg-neutral-700 dark:border-neutral-600"
+                            step="0.5"
+                            min="0"
+                          />
+                          <input
+                            type="number"
+                            value={item.vat}
+                            onChange={(e) =>
+                              updateDraftItem(
+                                i,
+                                "vat",
+                                parseFloat(e.target.value) || 0,
+                              )
+                            }
+                            placeholder="VAT"
+                            className="w-16 px-2 py-1 border rounded text-sm dark:bg-neutral-700 dark:border-neutral-600"
+                            step="0.01"
+                            min="0"
+                            max="1"
+                          />
+                          <button
+                            onClick={() => removeDraftItem(i)}
+                            className="w-8 h-8 flex items-center justify-center rounded-lg bg-red-50 dark:bg-red-900/30 hover:bg-red-100 dark:hover:bg-red-900/50 text-red-500"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        onClick={addDraftItem}
+                        className="w-full py-2 border-2 border-dashed border-neutral-300 dark:border-neutral-600 rounded-xl text-neutral-500 hover:border-neutral-400 hover:text-neutral-600 text-sm"
+                      >
+                        + Add Item
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      <div className="grid grid-cols-[1fr_auto_auto_auto] gap-2 px-3 py-1 text-xs font-medium text-neutral-500 dark:text-neutral-400 uppercase tracking-wide">
+                        <span>Name</span>
+                        <span className="w-20 text-right">Price</span>
+                        <span className="w-16 text-right">VAT</span>
+                        <span className="w-16 text-right">Category</span>
+                      </div>
+                      {menu.map((item) => (
+                        <div
+                          key={item.id}
+                          className="grid grid-cols-[1fr_auto_auto_auto] gap-2 items-center px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800"
+                          style={{
+                            borderLeftWidth: "4px",
+                            borderLeftColor:
+                              item.category === "Food" ? "#10b981" : "#0ea5e9",
+                          }}
+                        >
+                          <span className="font-medium">{item.name}</span>
+                          <span className="w-20 text-right text-sm">
+                            {eur(item.price)}
+                          </span>
+                          <span className="w-16 text-right text-sm text-neutral-500 dark:text-neutral-400">
+                            {(item.vat * 100).toFixed(0)}%
+                          </span>
+                          <span className="w-16 text-right text-xs text-neutral-500 dark:text-neutral-400">
+                            {item.category}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="mt-3 text-xs text-neutral-500 dark:text-neutral-400">
+                    {menu.length} items (
+                    {menu.filter((i) => i.category === "Food").length} food,{" "}
+                    {menu.filter((i) => i.category === "Drinks").length} drinks)
                   </div>
                 </div>
               )}
