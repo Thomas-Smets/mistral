@@ -1,0 +1,84 @@
+name: Sync menu
+
+on:
+  push:
+    branches: [main]
+    paths: [menu.xlsx]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install xlsx
+        run: npm install xlsx
+      - name: Sync DEFAULT_MENU and bump version
+        run: |
+          node -e "
+          const XLSX = require('xlsx');
+          const fs = require('fs');
+
+          // Parse menu.xlsx
+          const wb = XLSX.readFile('menu.xlsx');
+          const sheet = wb.Sheets[wb.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(sheet);
+          const menuItems = rows.filter(r => r.name).map((r, i) => ({
+            id: r.id || 'imported_' + i,
+            name: String(r.name),
+            category: String(r.category || 'Food'),
+            price: parseFloat(r.price) || 0,
+            vat: isNaN(parseFloat(r.vat)) ? 0.21 : parseFloat(r.vat),
+          }));
+
+          // Read index.html
+          let html = fs.readFileSync('index.html', 'utf8');
+
+          // Replace DEFAULT_MENU between markers
+          const startMarker = '// MENU_START';
+          const endMarker = '// MENU_END';
+          const startIdx = html.indexOf(startMarker);
+          const endIdx = html.indexOf(endMarker);
+          if (startIdx === -1 || endIdx === -1) {
+            console.error('Menu markers not found in index.html');
+            process.exit(1);
+          }
+          const indent = '      ';
+          const menuJs = indent + 'const DEFAULT_MENU = ' + JSON.stringify(menuItems, null, 2).split('\n').join('\n' + indent) + ';';
+          const newBlock = startMarker + '\n' + menuJs + '\n' + indent + endMarker;
+          html = html.slice(0, startIdx) + newBlock + html.slice(endIdx + endMarker.length);
+
+          // Bump APP_VERSION patch
+          const versionMatch = html.match(/const APP_VERSION = \"(\d+)\.(\d+)\.(\d+)\"/);
+          if (versionMatch) {
+            const major = versionMatch[1];
+            const minor = versionMatch[2];
+            const patch = parseInt(versionMatch[3]) + 1;
+            const newVersion = major + '.' + minor + '.' + patch;
+            html = html.replace(/const APP_VERSION = \"[^\"]+\"/, 'const APP_VERSION = \"' + newVersion + '\"');
+            console.log('Bumped version to ' + newVersion);
+          }
+
+          fs.writeFileSync('index.html', html);
+          console.log('Synced ' + menuItems.length + ' menu items');
+          "
+      - name: Format with prettier
+        run: npx prettier --write index.html
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "🔄 Sync menu from menu.xlsx and bump version"
+            git push
+          fi
