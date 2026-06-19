@@ -17,6 +17,41 @@ export default {
       });
     }
 
+    // Refresh an expired access token using the refresh token. GitHub App user
+    // tokens expire (~8h); the client posts its refresh_token here and gets a
+    // fresh bundle, so publishing doesn't require re-authorizing each session.
+    if (url.pathname === "/refresh" && request.method === "POST") {
+      const cors = {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "application/json",
+      };
+      const body = await request.json().catch(() => ({}));
+      if (!body.refresh_token) {
+        return new Response(
+          JSON.stringify({ error: "missing_refresh_token" }),
+          {
+            status: 400,
+            headers: cors,
+          },
+        );
+      }
+      const resp = await fetch("https://github.com/login/oauth/access_token", {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          client_id: env.GITHUB_CLIENT_ID,
+          client_secret: env.GITHUB_CLIENT_SECRET,
+          grant_type: "refresh_token",
+          refresh_token: body.refresh_token,
+        }),
+      });
+      const data = await resp.json();
+      return new Response(JSON.stringify(data), { headers: cors });
+    }
+
     // GitHub redirects here after user authorizes
     if (url.pathname === "/callback") {
       const code = url.searchParams.get("code");
