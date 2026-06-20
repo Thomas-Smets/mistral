@@ -1027,18 +1027,79 @@
       }
 
       // --- GitHub OAuth + Publish ---
-      function getGitHubToken() {
+      // GitHub App user tokens expire (~8h) and ship a refresh_token (~6 months).
+      // We persist the whole bundle and silently refresh, so publishing keeps
+      // working without re-authorizing on every session.
+      const GH_AUTH_KEY = "github_auth";
+
+      function getStoredAuth() {
         try {
-          return localStorage.getItem("github_token") || null;
+          const raw = localStorage.getItem(GH_AUTH_KEY);
+          return raw ? JSON.parse(raw) : null;
         } catch {
           return null;
         }
       }
 
-      function setGitHubToken(token) {
+      // Persist a GitHub token response. Keeps the prior refresh_token if a
+      // refresh response omits one. expires_at is absolute ms (null = no expiry).
+      function setStoredAuth(data) {
         try {
-          localStorage.setItem("github_token", token);
+          const prev = getStoredAuth();
+          const auth = {
+            access_token: data.access_token,
+            refresh_token: data.refresh_token || prev?.refresh_token || null,
+            expires_at: data.expires_in
+              ? Date.now() + data.expires_in * 1000
+              : null,
+          };
+          localStorage.setItem(GH_AUTH_KEY, JSON.stringify(auth));
         } catch {}
+      }
+
+      function clearStoredAuth() {
+        try {
+          localStorage.removeItem(GH_AUTH_KEY);
+          localStorage.removeItem("github_token"); // legacy bare-token key
+        } catch {}
+      }
+
+      // Swap the refresh token for a fresh access token via the worker (the
+      // exchange needs the client secret, which only the worker holds).
+      async function refreshGitHubToken() {
+        const auth = getStoredAuth();
+        if (!auth || !auth.refresh_token || !GITHUB_OAUTH_PROXY) return null;
+        try {
+          const resp = await fetch(GITHUB_OAUTH_PROXY + "/refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ refresh_token: auth.refresh_token }),
+          });
+          const data = await resp.json();
+          if (data && data.access_token) {
+            setStoredAuth(data);
+            return data.access_token;
+          }
+        } catch {}
+        clearStoredAuth();
+        return null;
+      }
+
+      // A usable access token: the stored one if still valid (60s safety
+      // margin), else refreshed, else null so the caller re-authorizes.
+      async function getValidGitHubToken() {
+        const auth = getStoredAuth();
+        if (!auth || !auth.access_token) {
+          try {
+            return localStorage.getItem("github_token") || null; // legacy
+          } catch {
+            return null;
+          }
+        }
+        if (!auth.expires_at || auth.expires_at - Date.now() > 60000) {
+          return auth.access_token;
+        }
+        return (await refreshGitHubToken()) || null;
       }
 
       function startGitHubAuth() {
@@ -1073,7 +1134,7 @@
               settled = true;
               clearInterval(interval);
               window.removeEventListener("message", onMessage);
-              setGitHubToken(event.data.access_token);
+              setStoredAuth(event.data);
               resolve(event.data.access_token);
             } else if (event.data && event.data.error) {
               settled = true;
@@ -1105,7 +1166,7 @@
             "XLSX library not loaded. Check your internet connection.",
           );
         }
-        let token = getGitHubToken();
+        let token = await getValidGitHubToken();
         if (!token) {
           token = await startGitHubAuth();
         }
@@ -1161,7 +1222,7 @@
         if (!putResp.ok) {
           const err = await putResp.json().catch(() => ({}));
           if (putResp.status === 401) {
-            localStorage.removeItem("github_token");
+            clearStoredAuth();
             throw new Error("GitHub token expired. Please try again.");
           }
           if (putResp.status === 403) {
