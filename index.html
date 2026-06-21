@@ -29,7 +29,10 @@
     <!-- React 18 UMD + Babel -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Pinned to Babel 7: the in-browser auto-transpile of type="text/babel"
+         broke when unpkg's unpinned "latest" rolled to Babel 8 (changed default
+         presets), leaving the page blank. -->
+    <script src="https://unpkg.com/@babel/standalone@7.29.7/babel.min.js"></script>
     <!-- XLSX for exports -->
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <!-- QR code generation -->
